@@ -18,7 +18,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use crate::bindings;
-use crate::utils::{mount_container, umount_container};
+use crate::utils::{mount_container, parse_mac, umount_container};
 use crate::{KrunvmConfig, VmConfig};
 
 #[derive(Args, Debug)]
@@ -168,21 +168,63 @@ unsafe fn exec_vm(
     #[cfg(target_os = "macos")]
     let mount_wrapper = build_mount_wrapper(rootfs, cmd, &vmcfg.workdir, &args, &virtiofs_mounts);
 
-    let mut ports = Vec::new();
-    for (host_port, guest_port) in vmcfg.mapped_ports.iter() {
-        let map = format!("{}:{}", host_port, guest_port);
-        ports.push(CString::new(map).unwrap());
-    }
-    let mut ps: Vec<*const c_char> = Vec::new();
-    for port in ports.iter() {
-        ps.push(port.as_ptr());
-    }
-    ps.push(std::ptr::null());
+    if let (Some(net_path), Some(mac_str)) = (&vmcfg.net_socket, &vmcfg.mac_address) {
+        // virtio-net path: connect to gvproxy via unix socket
+        let c_path = CString::new(net_path.as_str()).unwrap();
+        let mac_bytes = parse_mac(mac_str).unwrap_or_else(|e| {
+            println!("{}", e);
+            std::process::exit(-1);
+        });
 
-    let ret = bindings::krun_set_port_map(ctx, ps.as_ptr());
-    if ret < 0 {
-        println!("Error setting VM port map");
-        std::process::exit(-1);
+        #[cfg(target_os = "macos")]
+        {
+            let ret = bindings::krun_add_net_unixgram(
+                ctx,
+                c_path.as_ptr(),
+                -1,
+                mac_bytes.as_ptr(),
+                bindings::COMPAT_NET_FEATURES,
+                bindings::NET_FLAG_VFKIT,
+            );
+            if ret < 0 {
+                println!("Error adding virtio-net device (is gvproxy running?)");
+                std::process::exit(-1);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let ret = bindings::krun_add_net_unixstream(
+                ctx,
+                c_path.as_ptr(),
+                -1,
+                mac_bytes.as_ptr(),
+                bindings::COMPAT_NET_FEATURES,
+                0, // flags always 0 for unixstream (no vfkit magic)
+            );
+            if ret < 0 {
+                println!("Error adding virtio-net device (is gvproxy running?)");
+                std::process::exit(-1);
+            }
+        }
+    } else {
+        // TSI path: use port mapping (existing behavior)
+        let mut ports = Vec::new();
+        for (host_port, guest_port) in vmcfg.mapped_ports.iter() {
+            let map = format!("{}:{}", host_port, guest_port);
+            ports.push(CString::new(map).unwrap());
+        }
+        let mut ps: Vec<*const c_char> = Vec::new();
+        for port in ports.iter() {
+            ps.push(port.as_ptr());
+        }
+        ps.push(std::ptr::null());
+
+        let ret = bindings::krun_set_port_map(ctx, ps.as_ptr());
+        if ret < 0 {
+            println!("Error setting VM port map");
+            std::process::exit(-1);
+        }
     }
 
     if !vmcfg.workdir.is_empty() {

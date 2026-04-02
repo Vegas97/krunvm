@@ -35,4 +35,10 @@ pub fn printvm(vm: &VmConfig) {
     println!(" Workdir: {}", vm.workdir);
     println!(" Mapped volumes: {:?}", vm.mapped_volumes);
     println!(" Mapped ports: {:?}", vm.mapped_ports);
+    if let Some(ref net) = vm.net_socket {
+        println!(" Net socket: {}", net);
+    }
+    if let Some(ref mac) = vm.mac_address {
+        println!(" MAC address: {}", mac);
+    }
 }

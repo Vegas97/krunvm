@@ -9,8 +9,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::utils::{
-    get_buildah_args, mount_container, path_pairs_to_hash_map, port_pairs_to_hash_map,
-    umount_container, BuildahCommand, PathPair, PortPair,
+    generate_mac, get_buildah_args, mount_container, parse_mac, path_pairs_to_hash_map,
+    port_pairs_to_hash_map, umount_container, BuildahCommand, PathPair, PortPair,
 };
 use crate::{KrunvmConfig, VmConfig, APP_NAME};
 
@@ -51,6 +51,22 @@ pub struct CreateCmd {
     #[arg(long = "port")]
     ports: Vec<PortPair>,
 
+    /// Path to gvproxy unixgram/stream socket (enables virtio-net networking).
+    /// Mutually exclusive with --port (TSI networking).
+    #[arg(long)]
+    net: Option<String>,
+
+    /// VM MAC address (format: xx:xx:xx:xx:xx:xx). Only valid with --net.
+    /// When --net is specified without --mac, a random locally-administered
+    /// unicast MAC is generated. This matches krunvm's UX pattern of sensible
+    /// defaults (like auto-naming VMs and defaulting CPUs/RAM/DNS).
+    /// krunkit requires an explicit MAC, but krunvm targets a higher-level
+    /// audience where "just works" matters more than explicit control.
+    /// Users who need deterministic MACs (e.g., static DHCP leases in
+    /// gvproxy) can still pass --mac explicitly.
+    #[arg(long)]
+    mac: Option<String>,
+
     /// Create a x86_64 microVM even on an Aarch64 host
     #[arg(short, long)]
     #[cfg(target_os = "macos")]
@@ -68,6 +84,33 @@ impl CreateCmd {
         let mapped_ports = port_pairs_to_hash_map(self.ports);
         let image = self.image;
         let name = self.name;
+
+        // Validate --net / --port / --mac interactions
+        if self.mac.is_some() && self.net.is_none() {
+            println!("--mac requires --net");
+            std::process::exit(-1);
+        }
+        if self.net.is_some() && !mapped_ports.is_empty() {
+            println!("--net and --port are mutually exclusive");
+            std::process::exit(-1);
+        }
+
+        // Resolve MAC: use provided value or generate a random one
+        let (net_socket, mac_address) = if let Some(ref net_path) = self.net {
+            let mac = match self.mac {
+                Some(ref m) => {
+                    if let Err(e) = parse_mac(m) {
+                        println!("{}", e);
+                        std::process::exit(-1);
+                    }
+                    m.clone()
+                }
+                None => generate_mac(),
+            };
+            (Some(net_path.clone()), Some(mac))
+        } else {
+            (None, None)
+        };
 
         if let Some(ref name) = name {
             if name.is_empty() {
@@ -164,6 +207,8 @@ https://threedots.ovh/blog/2022/06/quick-look-at-rosetta-on-linux/
             workdir: workdir.to_string(),
             mapped_volumes,
             mapped_ports,
+            net_socket,
+            mac_address,
         };
 
         let rootfs = mount_container(cfg, &vmcfg).unwrap();

@@ -20,9 +20,20 @@ fn main() {
     };
     fs::create_dir_all(&outdir).unwrap();
 
-    for command in COMMANDS {
-        if let Err(err) = generate_man_page(&outdir, command) {
-            panic!("failed to generate man page: {}", err);
+    // Check if asciidoctor is available before attempting man page generation
+    match process::Command::new("asciidoctor").arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            for command in COMMANDS {
+                if let Err(err) = generate_man_page(&outdir, command) {
+                    println!(
+                        "cargo:warning=Failed to generate man page for {}: {}",
+                        command, err
+                    );
+                }
+            }
+        }
+        _ => {
+            println!("cargo:warning=asciidoctor not found, skipping man page generation. Install it with: brew install asciidoctor (or: gem install asciidoctor)");
         }
     }
 
@@ -31,12 +42,6 @@ fn main() {
 }
 
 fn generate_man_page<P: AsRef<Path>>(outdir: P, command: &str) -> io::Result<()> {
-    // If asciidoctor isn't installed, fallback to asciidoc.
-    if let Err(err) = process::Command::new("asciidoctor").output() {
-        eprintln!("Error from running 'asciidoctor': {}", err);
-        return Err(err);
-    }
-
     let outdir = outdir.as_ref();
     let outfile = outdir.join(format!("{}.1", command));
     let cwd = env::current_dir()?;
