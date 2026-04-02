@@ -53,3 +53,18 @@ dnf install -y krunvm
 ```
 cargo build --release
 ```
+
+#### macOS: Code signing (local development only)
+
+When building from source on macOS, the binary must be signed with
+Hypervisor.framework entitlements or `krunvm start` will fail. Run this
+after every build:
+
+```
+codesign --force --sign - \
+  --entitlements krunvm-entitlements.plist \
+  target/release/krunvm
+```
+
+This uses ad-hoc signing (no Apple Developer account required). The homebrew
+formula does this automatically, but local builds from source need it manually.
