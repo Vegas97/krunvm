@@ -176,36 +176,17 @@ unsafe fn exec_vm(
             std::process::exit(-1);
         });
 
-        #[cfg(target_os = "macos")]
-        {
-            let ret = bindings::krun_add_net_unixgram(
-                ctx,
-                c_path.as_ptr(),
-                -1,
-                mac_bytes.as_ptr(),
-                bindings::COMPAT_NET_FEATURES,
-                bindings::NET_FLAG_VFKIT,
-            );
-            if ret < 0 {
-                println!("Error adding virtio-net device (is gvproxy running?)");
-                std::process::exit(-1);
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            let ret = bindings::krun_add_net_unixstream(
-                ctx,
-                c_path.as_ptr(),
-                -1,
-                mac_bytes.as_ptr(),
-                bindings::COMPAT_NET_FEATURES,
-                0, // flags always 0 for unixstream (no vfkit magic)
-            );
-            if ret < 0 {
-                println!("Error adding virtio-net device (is gvproxy running?)");
-                std::process::exit(-1);
-            }
+        let ret = bindings::krun_add_net_unixstream(
+            ctx,
+            c_path.as_ptr(),
+            -1,
+            mac_bytes.as_ptr(),
+            bindings::COMPAT_NET_FEATURES,
+            0,
+        );
+        if ret < 0 {
+            println!("Error adding virtio-net device (is gvproxy running?)");
+            std::process::exit(-1);
         }
     } else {
         // TSI path: use port mapping (existing behavior)
