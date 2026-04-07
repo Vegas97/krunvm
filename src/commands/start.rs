@@ -174,7 +174,9 @@ unsafe fn exec_vm(
 
     match (&vmcfg.net_socket, &vmcfg.mac_address) {
         (Some(_), None) | (None, Some(_)) => {
-            println!("VM networking config is incomplete; both net socket and MAC address must be set");
+            println!(
+                "VM networking config is incomplete; both net socket and MAC address must be set"
+            );
             std::process::exit(-1);
         }
         (Some(_), Some(_)) if !vmcfg.mapped_ports.is_empty() => {
@@ -281,7 +283,8 @@ unsafe fn exec_vm(
     {
         if !vmcfg.cap_drop.is_empty() {
             // Write a capsh wrapper script into the rootfs
-            let wrapper = build_capdrop_wrapper(rootfs, cmd, &vmcfg.workdir, &args, &vmcfg.cap_drop);
+            let wrapper =
+                build_capdrop_wrapper(rootfs, cmd, &vmcfg.workdir, &args, &vmcfg.cap_drop);
             let mut wrapper_argv: Vec<*const c_char> =
                 wrapper.1.iter().map(|a| a.as_ptr()).collect();
             wrapper_argv.push(std::ptr::null());
@@ -379,7 +382,12 @@ fn write_mount_script(
             .map(|c| format!("cap_{}", c))
             .collect::<Vec<_>>()
             .join(",");
-        writeln!(file, "exec capsh --drop={} -- -c 'exec \"$@\"' -- \"$@\"", caps).unwrap();
+        writeln!(
+            file,
+            "exec capsh --drop={} -- -c 'exec \"$@\"' -- \"$@\"",
+            caps
+        )
+        .unwrap();
     }
 
     let perms = fs::Permissions::from_mode(0o755);

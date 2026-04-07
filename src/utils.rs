@@ -80,12 +80,19 @@ pub fn validate_capability(name: &str) -> Result<String, String> {
 pub fn parse_mac(s: &str) -> Result<[u8; 6], String> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 6 {
-        return Err(format!("Invalid MAC address '{}': expected 6 colon-separated hex pairs", s));
+        return Err(format!(
+            "Invalid MAC address '{}': expected 6 colon-separated hex pairs",
+            s
+        ));
     }
     let mut bytes = [0u8; 6];
     for (i, part) in parts.iter().enumerate() {
-        bytes[i] = u8::from_str_radix(part, 16)
-            .map_err(|_| format!("Invalid MAC address '{}': '{}' is not a valid hex byte", s, part))?;
+        bytes[i] = u8::from_str_radix(part, 16).map_err(|_| {
+            format!(
+                "Invalid MAC address '{}': '{}' is not a valid hex byte",
+                s, part
+            )
+        })?;
     }
     Ok(bytes)
 }
@@ -101,7 +108,8 @@ pub fn parse_mac(s: &str) -> Result<[u8; 6], String> {
 pub fn generate_mac() -> String {
     let mut bytes = [0u8; 6];
     let mut f = File::open("/dev/urandom").expect("Failed to open /dev/urandom");
-    f.read_exact(&mut bytes).expect("Failed to read from /dev/urandom");
+    f.read_exact(&mut bytes)
+        .expect("Failed to read from /dev/urandom");
     // Set locally-administered bit (bit 1) and clear multicast bit (bit 0)
     bytes[0] = (bytes[0] | 0x02) & 0xfe;
     format!(

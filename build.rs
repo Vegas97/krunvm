@@ -21,7 +21,10 @@ fn main() {
     fs::create_dir_all(&outdir).unwrap();
 
     // Check if asciidoctor is available before attempting man page generation
-    match process::Command::new("asciidoctor").arg("--version").output() {
+    match process::Command::new("asciidoctor")
+        .arg("--version")
+        .output()
+    {
         Ok(output) if output.status.success() => {
             for command in COMMANDS {
                 if let Err(err) = generate_man_page(&outdir, command) {
