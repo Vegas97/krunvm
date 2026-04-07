@@ -141,6 +141,17 @@ unsafe fn exec_vm(
     args: Vec<CString>,
     env_pairs: Vec<CString>,
 ) {
+    if !vmcfg.cap_drop.is_empty() && cmd.is_none() {
+        println!(
+            "Error: --cap-drop requires an explicit command.\n\
+             The OCI entrypoint cannot be resolved automatically when a\n\
+             capability-drop wrapper is needed.\n\
+             Please specify a command: krunvm start {} <cmd>",
+            vmcfg.name
+        );
+        std::process::exit(-1);
+    }
+
     //bindings::krun_set_log_level(9);
 
     let ctx = bindings::krun_create_ctx() as u32;
