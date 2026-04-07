@@ -383,7 +383,7 @@ fn write_mount_script(
         writeln!(file, "mount -t virtiofs {} {}", tag, guest_path).unwrap();
     }
     if !workdir.is_empty() {
-        writeln!(file, "cd {}", workdir).unwrap();
+        writeln!(file, "cd \"{}\"", workdir).unwrap();
     }
     if cap_drop.is_empty() {
         writeln!(file, "exec \"$@\"").unwrap();
@@ -437,7 +437,7 @@ fn build_capdrop_wrapper(
     writeln!(file, "#!/bin/sh").unwrap();
     writeln!(file, "set -e").unwrap();
     if !workdir.is_empty() {
-        writeln!(file, "cd {}", workdir).unwrap();
+        writeln!(file, "cd \"{}\"", workdir).unwrap();
     }
     writeln!(
         file,
