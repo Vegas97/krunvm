@@ -51,7 +51,7 @@ pub struct CreateCmd {
     #[arg(long = "port")]
     ports: Vec<PortPair>,
 
-    /// Path to gvproxy unixgram/stream socket (enables virtio-net networking).
+    /// Path to gvproxy unix socket (enables virtio-net networking).
     /// Mutually exclusive with --port (TSI networking).
     #[arg(long)]
     net: Option<String>,
@@ -111,8 +111,15 @@ impl CreateCmd {
             };
             let mac = match self.mac {
                 Some(ref m) => {
-                    if let Err(e) = parse_mac(m) {
+                    let bytes = parse_mac(m).unwrap_or_else(|e| {
                         println!("{}", e);
+                        std::process::exit(-1);
+                    });
+                    if bytes == [0; 6] || bytes == [0xff; 6] || (bytes[0] & 0x01) != 0 {
+                        println!(
+                            "Invalid MAC address '{}': expected a unicast, non-zero, non-broadcast address",
+                            m
+                        );
                         std::process::exit(-1);
                     }
                     m.clone()
