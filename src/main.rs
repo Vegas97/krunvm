@@ -42,6 +42,8 @@ pub struct VmConfig {
     mac_address: Option<String>,
     mapped_volumes: HashMap<String, String>,
     mapped_ports: HashMap<String, String>,
+    #[serde(default)]
+    cap_drop: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

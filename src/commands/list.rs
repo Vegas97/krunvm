@@ -41,4 +41,8 @@ pub fn printvm(vm: &VmConfig) {
     if let Some(ref mac) = vm.mac_address {
         println!(" MAC address: {}", mac);
     }
+    if !vm.cap_drop.is_empty() {
+        let caps: Vec<String> = vm.cap_drop.iter().map(|c| format!("cap_{}", c)).collect();
+        println!(" Dropped capabilities: {}", caps.join(", "));
+    }
 }

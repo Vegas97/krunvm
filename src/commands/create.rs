@@ -10,7 +10,8 @@ use std::process::Command;
 
 use crate::utils::{
     generate_mac, get_buildah_args, mount_container, parse_mac, path_pairs_to_hash_map,
-    port_pairs_to_hash_map, umount_container, BuildahCommand, PathPair, PortPair,
+    port_pairs_to_hash_map, umount_container, validate_capability, BuildahCommand, PathPair,
+    PortPair,
 };
 use crate::{KrunvmConfig, VmConfig, APP_NAME};
 
@@ -67,6 +68,13 @@ pub struct CreateCmd {
     #[arg(long)]
     mac: Option<String>,
 
+    /// Linux capabilities to drop inside the guest VM.
+    /// Accepts names like CAP_NET_RAW, cap_net_raw, or net_raw.
+    /// Repeat for multiple capabilities (e.g., --cap-drop CAP_NET_RAW --cap-drop CAP_SYS_ADMIN).
+    /// Requires capsh to be installed in the guest rootfs.
+    #[arg(long = "cap-drop")]
+    cap_drop: Vec<String>,
+
     /// Create a x86_64 microVM even on an Aarch64 host
     #[arg(short, long)]
     #[cfg(target_os = "macos")]
@@ -84,6 +92,18 @@ impl CreateCmd {
         let mapped_ports = port_pairs_to_hash_map(self.ports);
         let image = self.image;
         let name = self.name;
+
+        // Validate and normalize --cap-drop values
+        let cap_drop: Vec<String> = self
+            .cap_drop
+            .iter()
+            .map(|c| {
+                validate_capability(c).unwrap_or_else(|e| {
+                    println!("{}", e);
+                    std::process::exit(-1);
+                })
+            })
+            .collect();
 
         // Validate --net / --port / --mac interactions
         if self.mac.is_some() && self.net.is_none() {
@@ -228,6 +248,7 @@ https://threedots.ovh/blog/2022/06/quick-look-at-rosetta-on-linux/
             mapped_ports,
             net_socket,
             mac_address,
+            cap_drop,
         };
 
         let rootfs = mount_container(cfg, &vmcfg).unwrap();

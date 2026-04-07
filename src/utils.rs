@@ -10,6 +10,72 @@ use std::str::FromStr;
 
 use crate::{KrunvmConfig, VmConfig, APP_NAME};
 
+/// Linux capabilities that can be dropped inside the guest VM.
+/// Names follow the kernel convention (lowercase, no "cap_" prefix stored).
+const VALID_CAPABILITIES: &[&str] = &[
+    "audit_control",
+    "audit_read",
+    "audit_write",
+    "block_suspend",
+    "bpf",
+    "checkpoint_restore",
+    "chown",
+    "dac_override",
+    "dac_read_search",
+    "fowner",
+    "fsetid",
+    "ipc_lock",
+    "ipc_owner",
+    "kill",
+    "lease",
+    "linux_immutable",
+    "mac_admin",
+    "mac_override",
+    "mknod",
+    "net_admin",
+    "net_bind_service",
+    "net_broadcast",
+    "net_raw",
+    "perfmon",
+    "setfcap",
+    "setgid",
+    "setpcap",
+    "setuid",
+    "sys_admin",
+    "sys_boot",
+    "sys_chroot",
+    "sys_module",
+    "sys_nice",
+    "sys_pacct",
+    "sys_ptrace",
+    "sys_rawio",
+    "sys_resource",
+    "sys_time",
+    "sys_tty_config",
+    "syslog",
+    "wake_alarm",
+];
+
+/// Normalize and validate a capability name.
+/// Accepts "CAP_NET_RAW", "cap_net_raw", or "net_raw" — returns "net_raw".
+pub fn validate_capability(name: &str) -> Result<String, String> {
+    let normalized = name.to_lowercase();
+    let stripped = normalized.strip_prefix("cap_").unwrap_or(&normalized);
+    if VALID_CAPABILITIES.contains(&stripped) {
+        Ok(stripped.to_string())
+    } else {
+        Err(format!(
+            "Unknown capability '{}'. Valid capabilities: {}",
+            name,
+            VALID_CAPABILITIES
+                .iter()
+                .map(|c| format!("cap_{}", c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+}
+
 /// Parse a MAC address string "xx:xx:xx:xx:xx:xx" into 6 bytes.
 pub fn parse_mac(s: &str) -> Result<[u8; 6], String> {
     let parts: Vec<&str> = s.split(':').collect();
@@ -447,5 +513,38 @@ mod tests {
     fn path_pair_guest_too_deep() {
         let err = "/tmp:/a/b/c".parse::<PathPair>().unwrap_err();
         assert!(err.contains("single direct root"));
+    }
+
+    // === validate_capability ===
+
+    #[test]
+    fn validate_cap_uppercase_with_prefix() {
+        assert_eq!(validate_capability("CAP_NET_RAW").unwrap(), "net_raw");
+    }
+
+    #[test]
+    fn validate_cap_lowercase_with_prefix() {
+        assert_eq!(validate_capability("cap_sys_admin").unwrap(), "sys_admin");
+    }
+
+    #[test]
+    fn validate_cap_without_prefix() {
+        assert_eq!(validate_capability("sys_ptrace").unwrap(), "sys_ptrace");
+    }
+
+    #[test]
+    fn validate_cap_mixed_case() {
+        assert_eq!(validate_capability("Cap_Net_Raw").unwrap(), "net_raw");
+    }
+
+    #[test]
+    fn validate_cap_unknown() {
+        let err = validate_capability("CAP_DOES_NOT_EXIST").unwrap_err();
+        assert!(err.contains("Unknown capability"));
+    }
+
+    #[test]
+    fn validate_cap_empty() {
+        assert!(validate_capability("").is_err());
     }
 }

@@ -4,14 +4,11 @@
 use clap::Args;
 use libc::c_char;
 use std::ffi::CString;
-#[cfg(target_os = "macos")]
 use std::fs;
 use std::fs::File;
-#[cfg(target_os = "macos")]
 use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::io::{Error, ErrorKind};
-#[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 #[cfg(target_os = "macos")]
@@ -166,7 +163,14 @@ unsafe fn exec_vm(
     #[cfg(target_os = "macos")]
     let virtiofs_mounts = map_volumes(ctx, vmcfg, rootfs);
     #[cfg(target_os = "macos")]
-    let mount_wrapper = build_mount_wrapper(rootfs, cmd, &vmcfg.workdir, &args, &virtiofs_mounts);
+    let mount_wrapper = build_mount_wrapper(
+        rootfs,
+        cmd,
+        &vmcfg.workdir,
+        &args,
+        &virtiofs_mounts,
+        &vmcfg.cap_drop,
+    );
 
     match (&vmcfg.net_socket, &vmcfg.mac_address) {
         (Some(_), None) | (None, Some(_)) => {
@@ -275,7 +279,23 @@ unsafe fn exec_vm(
 
     #[cfg(not(target_os = "macos"))]
     {
-        if let Some(cmd) = cmd {
+        if !vmcfg.cap_drop.is_empty() {
+            // Write a capsh wrapper script into the rootfs
+            let wrapper = build_capdrop_wrapper(rootfs, cmd, &vmcfg.workdir, &args, &vmcfg.cap_drop);
+            let mut wrapper_argv: Vec<*const c_char> =
+                wrapper.1.iter().map(|a| a.as_ptr()).collect();
+            wrapper_argv.push(std::ptr::null());
+            let ret = bindings::krun_set_exec(
+                ctx,
+                wrapper.0.as_ptr(),
+                wrapper_argv.as_ptr(),
+                env.as_ptr(),
+            );
+            if ret < 0 {
+                println!("Error setting VM config");
+                std::process::exit(-1);
+            }
+        } else if let Some(cmd) = cmd {
             let mut argv: Vec<*const c_char> = Vec::new();
             for a in args.iter() {
                 argv.push(a.as_ptr());
@@ -311,12 +331,13 @@ fn build_mount_wrapper(
     workdir: &str,
     args: &[CString],
     mounts: &[(String, String)],
+    cap_drop: &[String],
 ) -> Option<(CString, Vec<CString>)> {
-    if mounts.is_empty() {
+    if mounts.is_empty() && cap_drop.is_empty() {
         return None;
     }
 
-    let helper_path = write_mount_script(rootfs, workdir, mounts);
+    let helper_path = write_mount_script(rootfs, workdir, mounts, cap_drop);
 
     let mut exec_args: Vec<CString> = Vec::new();
     let command = cmd.unwrap_or("/bin/sh");
@@ -328,7 +349,12 @@ fn build_mount_wrapper(
 }
 
 #[cfg(target_os = "macos")]
-fn write_mount_script(rootfs: &str, workdir: &str, mounts: &[(String, String)]) -> String {
+fn write_mount_script(
+    rootfs: &str,
+    workdir: &str,
+    mounts: &[(String, String)],
+    cap_drop: &[String],
+) -> String {
     let host_path = format!("{}/.krunvm-mount.sh", rootfs);
     let guest_path = "/.krunvm-mount.sh".to_string();
 
@@ -345,7 +371,16 @@ fn write_mount_script(rootfs: &str, workdir: &str, mounts: &[(String, String)]) 
     if !workdir.is_empty() {
         writeln!(file, "cd {}", workdir).unwrap();
     }
-    writeln!(file, "exec \"$@\"").unwrap();
+    if cap_drop.is_empty() {
+        writeln!(file, "exec \"$@\"").unwrap();
+    } else {
+        let caps = cap_drop
+            .iter()
+            .map(|c| format!("cap_{}", c))
+            .collect::<Vec<_>>()
+            .join(",");
+        writeln!(file, "exec capsh --drop={} -- -c 'exec \"$@\"' -- \"$@\"", caps).unwrap();
+    }
 
     let perms = fs::Permissions::from_mode(0o755);
     if let Err(err) = fs::set_permissions(&host_path, perms) {
@@ -354,6 +389,56 @@ fn write_mount_script(rootfs: &str, workdir: &str, mounts: &[(String, String)]) 
     }
 
     guest_path
+}
+
+/// Write a shell wrapper that drops capabilities via capsh before exec'ing the command.
+/// Used on Linux where there is no mount wrapper script.
+#[cfg(not(target_os = "macos"))]
+fn build_capdrop_wrapper(
+    rootfs: &str,
+    cmd: Option<&str>,
+    workdir: &str,
+    args: &[CString],
+    cap_drop: &[String],
+) -> (CString, Vec<CString>) {
+    let host_path = format!("{}/.krunvm-capdrop.sh", rootfs);
+    let guest_path = "/.krunvm-capdrop.sh";
+
+    let mut file = File::create(&host_path).unwrap_or_else(|err| {
+        println!("Error creating capability-drop helper script: {}", err);
+        std::process::exit(-1);
+    });
+
+    let caps = cap_drop
+        .iter()
+        .map(|c| format!("cap_{}", c))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    writeln!(file, "#!/bin/sh").unwrap();
+    writeln!(file, "set -e").unwrap();
+    if !workdir.is_empty() {
+        writeln!(file, "cd {}", workdir).unwrap();
+    }
+    writeln!(
+        file,
+        "exec capsh --drop={} -- -c 'exec \"$@\"' -- \"$@\"",
+        caps
+    )
+    .unwrap();
+
+    let perms = fs::Permissions::from_mode(0o755);
+    if let Err(err) = fs::set_permissions(&host_path, perms) {
+        println!("Error setting capability-drop helper permissions: {}", err);
+        std::process::exit(-1);
+    }
+
+    let command = cmd.unwrap_or("/bin/sh");
+    let mut exec_args: Vec<CString> = Vec::new();
+    exec_args.push(CString::new(command).unwrap());
+    exec_args.extend(args.iter().cloned());
+
+    (CString::new(guest_path).unwrap(), exec_args)
 }
 
 fn set_rlimits() {
