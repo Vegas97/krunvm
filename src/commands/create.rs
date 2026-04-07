@@ -97,6 +97,18 @@ impl CreateCmd {
 
         // Resolve MAC: use provided value or generate a random one
         let (net_socket, mac_address) = if let Some(ref net_path) = self.net {
+            let net_path = if std::path::Path::new(net_path).is_absolute() {
+                net_path.clone()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|e| {
+                        println!("Error resolving current directory: {}", e);
+                        std::process::exit(-1);
+                    })
+                    .join(net_path)
+                    .to_string_lossy()
+                    .into_owned()
+            };
             let mac = match self.mac {
                 Some(ref m) => {
                     if let Err(e) = parse_mac(m) {
@@ -107,7 +119,7 @@ impl CreateCmd {
                 }
                 None => generate_mac(),
             };
-            (Some(net_path.clone()), Some(mac))
+            (Some(net_path), Some(mac))
         } else {
             (None, None)
         };

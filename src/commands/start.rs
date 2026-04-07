@@ -168,6 +168,18 @@ unsafe fn exec_vm(
     #[cfg(target_os = "macos")]
     let mount_wrapper = build_mount_wrapper(rootfs, cmd, &vmcfg.workdir, &args, &virtiofs_mounts);
 
+    match (&vmcfg.net_socket, &vmcfg.mac_address) {
+        (Some(_), None) | (None, Some(_)) => {
+            println!("VM networking config is incomplete; both net socket and MAC address must be set");
+            std::process::exit(-1);
+        }
+        (Some(_), Some(_)) if !vmcfg.mapped_ports.is_empty() => {
+            println!("Port mappings are not supported when virtio-net is configured");
+            std::process::exit(-1);
+        }
+        _ => {}
+    }
+
     if let (Some(net_path), Some(mac_str)) = (&vmcfg.net_socket, &vmcfg.mac_address) {
         // virtio-net path: connect to gvproxy via unix socket
         let c_path = CString::new(net_path.as_str()).unwrap();

@@ -60,7 +60,7 @@ When building from source on macOS, the binary must be signed with
 Hypervisor.framework entitlements or `krunvm start` will fail. Run this
 after every build:
 
-```
+```bash
 codesign --force --sign - \
   --entitlements krunvm-entitlements.plist \
   target/release/krunvm
