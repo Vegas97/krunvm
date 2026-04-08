@@ -2,11 +2,121 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 use std::str::FromStr;
 
 use crate::{KrunvmConfig, VmConfig, APP_NAME};
+
+/// Linux capabilities that can be dropped inside the guest VM.
+/// Names follow the kernel convention (lowercase, no "cap_" prefix stored).
+const VALID_CAPABILITIES: &[&str] = &[
+    "audit_control",
+    "audit_read",
+    "audit_write",
+    "block_suspend",
+    "bpf",
+    "checkpoint_restore",
+    "chown",
+    "dac_override",
+    "dac_read_search",
+    "fowner",
+    "fsetid",
+    "ipc_lock",
+    "ipc_owner",
+    "kill",
+    "lease",
+    "linux_immutable",
+    "mac_admin",
+    "mac_override",
+    "mknod",
+    "net_admin",
+    "net_bind_service",
+    "net_broadcast",
+    "net_raw",
+    "perfmon",
+    "setfcap",
+    "setgid",
+    "setpcap",
+    "setuid",
+    "sys_admin",
+    "sys_boot",
+    "sys_chroot",
+    "sys_module",
+    "sys_nice",
+    "sys_pacct",
+    "sys_ptrace",
+    "sys_rawio",
+    "sys_resource",
+    "sys_time",
+    "sys_tty_config",
+    "syslog",
+    "wake_alarm",
+];
+
+/// Normalize and validate a capability name.
+/// Accepts "CAP_NET_RAW", "cap_net_raw", or "net_raw" — returns "net_raw".
+pub fn validate_capability(name: &str) -> Result<String, String> {
+    let normalized = name.to_lowercase();
+    let stripped = normalized.strip_prefix("cap_").unwrap_or(&normalized);
+    if VALID_CAPABILITIES.contains(&stripped) {
+        Ok(stripped.to_string())
+    } else {
+        Err(format!(
+            "Unknown capability '{}'. Valid capabilities: {}",
+            name,
+            VALID_CAPABILITIES
+                .iter()
+                .map(|c| format!("cap_{}", c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+}
+
+/// Parse a MAC address string "xx:xx:xx:xx:xx:xx" into 6 bytes.
+pub fn parse_mac(s: &str) -> Result<[u8; 6], String> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        return Err(format!(
+            "Invalid MAC address '{}': expected 6 colon-separated hex pairs",
+            s
+        ));
+    }
+    let mut bytes = [0u8; 6];
+    for (i, part) in parts.iter().enumerate() {
+        bytes[i] = u8::from_str_radix(part, 16).map_err(|_| {
+            format!(
+                "Invalid MAC address '{}': '{}' is not a valid hex byte",
+                s, part
+            )
+        })?;
+    }
+    Ok(bytes)
+}
+
+/// Generate a random locally-administered unicast MAC address.
+///
+/// When --net is specified without --mac, a random MAC is generated.
+/// This matches krunvm's UX pattern of sensible defaults (like auto-naming
+/// VMs and defaulting CPUs/RAM/DNS). krunkit requires an explicit MAC,
+/// but krunvm targets a higher-level audience where "just works" matters
+/// more than explicit control. Users who need deterministic MACs (e.g.,
+/// static DHCP leases in gvproxy) can still pass --mac explicitly.
+pub fn generate_mac() -> String {
+    let mut bytes = [0u8; 6];
+    let mut f = File::open("/dev/urandom").expect("Failed to open /dev/urandom");
+    f.read_exact(&mut bytes)
+        .expect("Failed to read from /dev/urandom");
+    // Set locally-administered bit (bit 1) and clear multicast bit (bit 0)
+    bytes[0] = (bytes[0] | 0x02) & 0xfe;
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
+    )
+}
 
 pub enum BuildahCommand {
     From,
@@ -291,4 +401,158 @@ pub fn remove_container(cfg: &KrunvmConfig, vmcfg: &VmConfig) -> Result<(), std:
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // === parse_mac ===
+
+    #[test]
+    fn parse_mac_valid_lowercase() {
+        assert_eq!(
+            parse_mac("aa:bb:cc:dd:ee:ff").unwrap(),
+            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+        );
+    }
+
+    #[test]
+    fn parse_mac_valid_all_zeros() {
+        assert_eq!(parse_mac("00:00:00:00:00:00").unwrap(), [0; 6]);
+    }
+
+    #[test]
+    fn parse_mac_valid_uppercase() {
+        assert_eq!(
+            parse_mac("AA:BB:CC:DD:EE:FF").unwrap(),
+            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+        );
+    }
+
+    #[test]
+    fn parse_mac_invalid_garbage() {
+        let err = parse_mac("ZZZZ").unwrap_err();
+        assert!(err.contains("expected 6"));
+    }
+
+    #[test]
+    fn parse_mac_too_few_pairs() {
+        let err = parse_mac("aa:bb:cc").unwrap_err();
+        assert!(err.contains("expected 6"));
+    }
+
+    #[test]
+    fn parse_mac_invalid_hex_byte() {
+        let err = parse_mac("gg:bb:cc:dd:ee:ff").unwrap_err();
+        assert!(err.contains("'gg'"));
+    }
+
+    #[test]
+    fn parse_mac_too_many_pairs() {
+        let err = parse_mac("aa:bb:cc:dd:ee:ff:00").unwrap_err();
+        assert!(err.contains("expected 6"));
+    }
+
+    // === generate_mac ===
+
+    #[test]
+    fn generate_mac_format() {
+        let mac = generate_mac();
+        assert_eq!(mac.len(), 17);
+        assert_eq!(mac.matches(':').count(), 5);
+    }
+
+    #[test]
+    fn generate_mac_locally_administered_bit() {
+        let mac = generate_mac();
+        let first_byte = u8::from_str_radix(&mac[..2], 16).unwrap();
+        assert_eq!(first_byte & 0x02, 0x02);
+    }
+
+    #[test]
+    fn generate_mac_unicast_bit() {
+        let mac = generate_mac();
+        let first_byte = u8::from_str_radix(&mac[..2], 16).unwrap();
+        assert_eq!(first_byte & 0x01, 0x00);
+    }
+
+    #[test]
+    fn generate_mac_roundtrip() {
+        let mac = generate_mac();
+        assert!(parse_mac(&mac).is_ok());
+    }
+
+    // === PortPair::from_str ===
+
+    #[test]
+    fn port_pair_valid() {
+        let pair: PortPair = "8080:80".parse().unwrap();
+        assert_eq!(pair.host_port, "8080");
+        assert_eq!(pair.guest_port, "80");
+    }
+
+    #[test]
+    fn port_pair_invalid_host() {
+        assert!("abc:80".parse::<PortPair>().is_err());
+    }
+
+    #[test]
+    fn port_pair_too_many_separators() {
+        assert!("80:80:80".parse::<PortPair>().is_err());
+    }
+
+    // === PathPair::from_str ===
+
+    #[test]
+    fn path_pair_valid() {
+        let pair: PathPair = "/tmp:/guest".parse().unwrap();
+        assert_eq!(pair.host_path, "/tmp");
+        assert_eq!(pair.guest_path, "/guest");
+    }
+
+    #[test]
+    fn path_pair_relative_host() {
+        let err = "relative:/guest".parse::<PathPair>().unwrap_err();
+        assert!(err.contains("not an absolute"));
+    }
+
+    #[test]
+    fn path_pair_guest_too_deep() {
+        let err = "/tmp:/a/b/c".parse::<PathPair>().unwrap_err();
+        assert!(err.contains("single direct root"));
+    }
+
+    // === validate_capability ===
+
+    #[test]
+    fn validate_cap_uppercase_with_prefix() {
+        assert_eq!(validate_capability("CAP_NET_RAW").unwrap(), "net_raw");
+    }
+
+    #[test]
+    fn validate_cap_lowercase_with_prefix() {
+        assert_eq!(validate_capability("cap_sys_admin").unwrap(), "sys_admin");
+    }
+
+    #[test]
+    fn validate_cap_without_prefix() {
+        assert_eq!(validate_capability("sys_ptrace").unwrap(), "sys_ptrace");
+    }
+
+    #[test]
+    fn validate_cap_mixed_case() {
+        assert_eq!(validate_capability("Cap_Net_Raw").unwrap(), "net_raw");
+    }
+
+    #[test]
+    fn validate_cap_unknown() {
+        let err = validate_capability("CAP_DOES_NOT_EXIST").unwrap_err();
+        assert!(err.contains("Unknown capability"));
+    }
+
+    #[test]
+    fn validate_cap_empty() {
+        assert!(validate_capability("").is_err());
+    }
 }

@@ -38,6 +38,12 @@ pub struct VmConfig {
     container: String,
     workdir: String,
     dns: String,
+    net_socket: Option<String>,
+    mac_address: Option<String>,
+    #[serde(default)]
+    rootfs_ro: bool,
+    #[serde(default)]
+    cap_drop: Vec<String>,
     mapped_volumes: HashMap<String, String>,
     mapped_ports: HashMap<String, String>,
 }
