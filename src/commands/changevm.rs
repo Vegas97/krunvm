@@ -49,6 +49,14 @@ pub struct ChangeVmCmd {
     #[arg(long = "port")]
     ports: Vec<PortPair>,
 
+    /// Mount the root filesystem as read-only
+    #[arg(long)]
+    rootfs_ro: bool,
+
+    /// Remove read-only rootfs setting
+    #[arg(long)]
+    remove_rootfs_ro: bool,
+
     /// Remove all capability drop rules
     #[arg(long)]
     remove_cap_drop: bool,
@@ -137,6 +145,14 @@ impl ChangeVmCmd {
 
         if let Some(workdir) = self.workdir {
             vmcfg.workdir = workdir.to_string();
+            cfg_changed = true;
+        }
+
+        if self.rootfs_ro {
+            vmcfg.rootfs_ro = true;
+            cfg_changed = true;
+        } else if self.remove_rootfs_ro {
+            vmcfg.rootfs_ro = false;
             cfg_changed = true;
         }
 

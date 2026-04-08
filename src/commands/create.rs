@@ -68,6 +68,11 @@ pub struct CreateCmd {
     #[arg(long)]
     mac: Option<String>,
 
+    /// Mount the root filesystem as read-only at the hypervisor level.
+    /// The guest kernel physically cannot write to the rootfs.
+    #[arg(long)]
+    rootfs_ro: bool,
+
     /// Linux capabilities to drop inside the guest VM.
     /// Accepts names like CAP_NET_RAW, cap_net_raw, or net_raw.
     /// Repeat for multiple capabilities (e.g., --cap-drop CAP_NET_RAW --cap-drop CAP_SYS_ADMIN).
@@ -248,6 +253,7 @@ https://threedots.ovh/blog/2022/06/quick-look-at-rosetta-on-linux/
             mapped_ports,
             net_socket,
             mac_address,
+            rootfs_ro: self.rootfs_ro,
             cap_drop,
         };
 

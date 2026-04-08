@@ -155,7 +155,11 @@ unsafe fn exec_vm(
     }
 
     let c_rootfs = CString::new(rootfs).unwrap();
-    let ret = bindings::krun_set_root(ctx, c_rootfs.as_ptr());
+    let ret = if vmcfg.rootfs_ro {
+        bindings::krun_set_root_ro(ctx, c_rootfs.as_ptr())
+    } else {
+        bindings::krun_set_root(ctx, c_rootfs.as_ptr())
+    };
     if ret < 0 {
         println!("Error setting VM rootfs");
         std::process::exit(-1);

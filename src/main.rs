@@ -40,10 +40,12 @@ pub struct VmConfig {
     dns: String,
     net_socket: Option<String>,
     mac_address: Option<String>,
-    mapped_volumes: HashMap<String, String>,
-    mapped_ports: HashMap<String, String>,
+    #[serde(default)]
+    rootfs_ro: bool,
     #[serde(default)]
     cap_drop: Vec<String>,
+    mapped_volumes: HashMap<String, String>,
+    mapped_ports: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
