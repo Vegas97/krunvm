@@ -71,7 +71,7 @@ pub struct CreateCmd {
     /// Linux capabilities to drop inside the guest VM.
     /// Accepts names like CAP_NET_RAW, cap_net_raw, or net_raw.
     /// Repeat for multiple capabilities (e.g., --cap-drop CAP_NET_RAW --cap-drop CAP_SYS_ADMIN).
-    /// Requires capsh to be installed in the guest rootfs.
+    /// Requires capsh in the guest rootfs (libcap on most distros, libcap-utils on Alpine).
     #[arg(long = "cap-drop")]
     cap_drop: Vec<String>,
 

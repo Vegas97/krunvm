@@ -141,16 +141,8 @@ unsafe fn exec_vm(
     args: Vec<CString>,
     env_pairs: Vec<CString>,
 ) {
-    if !vmcfg.cap_drop.is_empty() && cmd.is_none() {
-        println!(
-            "Error: --cap-drop requires an explicit command.\n\
-             The OCI entrypoint cannot be resolved automatically when a\n\
-             capability-drop wrapper is needed.\n\
-             Please specify a command: krunvm start {} <cmd>",
-            vmcfg.name
-        );
-        std::process::exit(-1);
-    }
+    // cap-drop without explicit cmd is fine — build_mount_wrapper will
+    // resolve the OCI entrypoint from .krun_config.json
 
     //bindings::krun_set_log_level(9);
 
@@ -354,9 +346,21 @@ fn build_mount_wrapper(
     let helper_path = write_mount_script(rootfs, workdir, mounts, cap_drop);
 
     let mut exec_args: Vec<CString> = Vec::new();
-    let command = cmd.unwrap_or("/bin/sh");
-    exec_args.push(CString::new(command).unwrap());
-    exec_args.extend(args.iter().cloned());
+    if let Some(command) = cmd {
+        exec_args.push(CString::new(command).unwrap());
+        exec_args.extend(args.iter().cloned());
+    } else {
+        // No explicit command — resolve from OCI config
+        let oci_cmd = resolve_oci_cmd_from_config(rootfs);
+        if oci_cmd.is_empty() {
+            exec_args.push(CString::new("/bin/sh").unwrap());
+        } else {
+            for part in &oci_cmd {
+                exec_args.push(CString::new(part.as_str()).unwrap());
+            }
+        }
+        exec_args.extend(args.iter().cloned());
+    }
 
     let helper_cstr = CString::new(helper_path).unwrap();
     Some((helper_cstr, exec_args))
@@ -393,9 +397,13 @@ fn write_mount_script(
             .map(|c| format!("cap_{}", c))
             .collect::<Vec<_>>()
             .join(",");
+        // Use --shell=$1 to override capsh's default /bin/bash, then shift
+        // and pass remaining args via --. This avoids a /bin/bash dependency.
+        writeln!(file, "CMD=\"$1\"").unwrap();
+        writeln!(file, "shift").unwrap();
         writeln!(
             file,
-            "exec capsh --drop={} -- -c 'exec \"$@\"' -- \"$@\"",
+            "exec capsh --drop={} --shell=\"$CMD\" -- \"$@\"",
             caps
         )
         .unwrap();
@@ -439,9 +447,11 @@ fn build_capdrop_wrapper(
     if !workdir.is_empty() {
         writeln!(file, "cd \"{}\"", workdir).unwrap();
     }
+    writeln!(file, "CMD=\"$1\"").unwrap();
+    writeln!(file, "shift").unwrap();
     writeln!(
         file,
-        "exec capsh --drop={} -- -c 'exec \"$@\"' -- \"$@\"",
+        "exec capsh --drop={} --shell=\"$CMD\" -- \"$@\"",
         caps
     )
     .unwrap();
@@ -489,4 +499,60 @@ fn set_lock(rootfs: &str) -> File {
     }
 
     file
+}
+
+/// Resolve the OCI command from .krun_config.json in the rootfs.
+///
+/// Follows the OCI runtime spec for combining Entrypoint and Cmd:
+///   - Both set:        Entrypoint + Cmd (concatenated)
+///   - Entrypoint only: Entrypoint
+///   - Cmd only:        Cmd
+///   - Neither:         empty (caller falls back to ["/bin/sh"])
+///
+/// This matches libkrun's init behavior (init/init.c concat_entrypoint_argv).
+fn resolve_oci_cmd_from_config(rootfs: &str) -> Vec<String> {
+    let config_path = format!("{}/.krun_config.json", rootfs);
+    let json_str = match fs::read_to_string(&config_path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let val: serde_json::Value = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    // Try OCIv1.config first, then Docker.config as fallback
+    for section in &["OCIv1", "Docker"] {
+        let config = match val.get(section).and_then(|v| v.get("config")) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let entrypoint = parse_string_array(config.get("Entrypoint"));
+        let cmd = parse_string_array(config.get("Cmd"));
+
+        match (entrypoint.is_empty(), cmd.is_empty()) {
+            (false, false) => {
+                let mut result = entrypoint;
+                result.extend(cmd);
+                return result;
+            }
+            (false, true) => return entrypoint,
+            (true, false) => return cmd,
+            (true, true) => continue,
+        }
+    }
+
+    Vec::new()
+}
+
+/// Parse a JSON value as a string array, returning empty vec for null/missing/invalid.
+fn parse_string_array(val: Option<&serde_json::Value>) -> Vec<String> {
+    val.and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
