@@ -327,6 +327,18 @@ unsafe fn exec_vm(
         }
     }
 
+    if let Some(balloon_mb) = vmcfg.balloon_target_mb {
+        // Balloon initial target: inflate (mem - balloon) worth of pages
+        // so the VM starts with only balloon_mb resident.
+        // Pages are 4KB: 256 pages = 1MB
+        let initial_target = (vmcfg.mem - balloon_mb) * 256;
+        let ret = bindings::krun_set_balloon_config(ctx, initial_target);
+        if ret < 0 {
+            println!("Error setting balloon config");
+            std::process::exit(-1);
+        }
+    }
+
     let ret = bindings::krun_start_enter(ctx);
     if ret < 0 {
         println!("Error starting VM");

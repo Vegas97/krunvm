@@ -68,6 +68,13 @@ pub struct CreateCmd {
     #[arg(long)]
     mac: Option<String>,
 
+    /// Initial memory balloon target in MiB. The VM is allocated --mem MiB
+    /// but the balloon inflates to reclaim (mem - balloon) MiB at boot,
+    /// so the VM starts with only this many MiB resident. Must be < --mem
+    /// and >= 32.
+    #[arg(long)]
+    balloon: Option<u32>,
+
     /// Mount the root filesystem as read-only at the hypervisor level.
     /// The guest kernel physically cannot write to the rootfs.
     #[arg(long)]
@@ -97,6 +104,21 @@ impl CreateCmd {
         let mapped_ports = port_pairs_to_hash_map(self.ports);
         let image = self.image;
         let name = self.name;
+
+        // Validate --balloon
+        let balloon_target_mb = if let Some(balloon) = self.balloon {
+            if balloon >= mem {
+                println!("--balloon ({} MiB) must be less than --mem ({} MiB)", balloon, mem);
+                std::process::exit(-1);
+            }
+            if balloon < 32 {
+                println!("--balloon ({} MiB) must be at least 32 MiB (boot may fail below this)", balloon);
+                std::process::exit(-1);
+            }
+            Some(balloon)
+        } else {
+            None
+        };
 
         // Validate and normalize --cap-drop values
         let cap_drop: Vec<String> = self
@@ -253,6 +275,7 @@ https://threedots.ovh/blog/2022/06/quick-look-at-rosetta-on-linux/
             mapped_ports,
             net_socket,
             mac_address,
+            balloon_target_mb,
             rootfs_ro: self.rootfs_ro,
             cap_drop,
         };

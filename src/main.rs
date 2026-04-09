@@ -41,6 +41,8 @@ pub struct VmConfig {
     net_socket: Option<String>,
     mac_address: Option<String>,
     #[serde(default)]
+    balloon_target_mb: Option<u32>,
+    #[serde(default)]
     rootfs_ro: bool,
     #[serde(default)]
     cap_drop: Vec<String>,

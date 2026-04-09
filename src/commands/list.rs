@@ -35,6 +35,9 @@ pub fn printvm(vm: &VmConfig) {
     println!(" Workdir: {}", vm.workdir);
     println!(" Mapped volumes: {:?}", vm.mapped_volumes);
     println!(" Mapped ports: {:?}", vm.mapped_ports);
+    if let Some(balloon) = vm.balloon_target_mb {
+        println!(" Balloon target (MiB): {}", balloon);
+    }
     if let Some(ref net) = vm.net_socket {
         println!(" Net socket: {}", net);
     }

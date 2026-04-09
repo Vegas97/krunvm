@@ -41,7 +41,16 @@ fn main() {
     }
 
     #[cfg(target_os = "macos")]
-    println!("cargo:rustc-link-search=/opt/homebrew/lib");
+    {
+        // Prefer ~/.local/lib for custom libkrun builds (balloon, rootfs_ro, etc.)
+        if let Ok(home) = env::var("HOME") {
+            let local_lib = format!("{}/.local/lib", home);
+            if Path::new(&local_lib).is_dir() {
+                println!("cargo:rustc-link-search=native={}", local_lib);
+            }
+        }
+        println!("cargo:rustc-link-search=/opt/homebrew/lib");
+    }
 }
 
 fn generate_man_page<P: AsRef<Path>>(outdir: P, command: &str) -> io::Result<()> {
