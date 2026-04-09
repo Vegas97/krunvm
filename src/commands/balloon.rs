@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use clap::Args;
 
+use crate::utils::{balloon_set_cmd, balloon_stats_cmd, control_socket_path, parse_balloon_stats};
 use crate::KrunvmConfig;
 
 /// Adjust or query the memory balloon of a running microVM
@@ -39,12 +40,12 @@ impl BalloonCmd {
             std::process::exit(-1);
         }
 
-        let socket_path = vmcfg
+        let socket = vmcfg
             .control_socket
             .clone()
-            .unwrap_or_else(|| format!("/tmp/krunvm-{}.sock", self.name));
+            .unwrap_or_else(|| control_socket_path(&self.name));
 
-        let mut stream = match UnixStream::connect(&socket_path) {
+        let mut stream = match UnixStream::connect(&socket) {
             Ok(s) => s,
             Err(e) => {
                 match e.kind() {
@@ -70,30 +71,19 @@ impl BalloonCmd {
             .unwrap();
 
         if let Some(target_mb) = self.target {
-            send_command(
-                &mut stream,
-                &format!("{{\"cmd\":\"balloon_set\",\"target_mib\":{}}}", target_mb),
-            );
+            send_command(&mut stream, &balloon_set_cmd(target_mb));
         }
 
         if self.stats {
-            let response = send_command(&mut stream, "{\"cmd\":\"balloon_stats\"}");
-            let val: serde_json::Value = match serde_json::from_str(&response) {
-                Ok(v) => v,
-                Err(_) => {
-                    println!("Failed to parse response: {}", response);
+            let response = send_command(&mut stream, &balloon_stats_cmd());
+            match parse_balloon_stats(&response) {
+                Ok((actual, target, free)) => {
+                    println!("actual: {} MiB, target: {} MiB, free: {} MiB", actual, target, free);
+                }
+                Err(e) => {
+                    println!("Error: {}", e);
                     std::process::exit(-1);
                 }
-            };
-            if val.get("ok") == Some(&serde_json::Value::Bool(true)) {
-                let actual = val["actual_mib"].as_u64().unwrap_or(0);
-                let target = val["target_mib"].as_u64().unwrap_or(0);
-                let free = val["free_mib"].as_u64().unwrap_or(0);
-                println!("actual: {} MiB, target: {} MiB, free: {} MiB", actual, target, free);
-            } else {
-                let err = val["error"].as_str().unwrap_or("unknown error");
-                println!("Error: {}", err);
-                std::process::exit(-1);
             }
         }
     }

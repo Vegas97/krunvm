@@ -9,9 +9,9 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::utils::{
-    generate_mac, get_buildah_args, mount_container, parse_mac, path_pairs_to_hash_map,
-    port_pairs_to_hash_map, umount_container, validate_capability, BuildahCommand, PathPair,
-    PortPair,
+    control_socket_path, generate_mac, get_buildah_args, mount_container, parse_mac,
+    path_pairs_to_hash_map, port_pairs_to_hash_map, umount_container, validate_balloon,
+    validate_capability, BuildahCommand, PathPair, PortPair,
 };
 use crate::{KrunvmConfig, VmConfig, APP_NAME};
 
@@ -107,15 +107,13 @@ impl CreateCmd {
 
         // Validate --balloon
         let balloon_target_mb = if let Some(balloon) = self.balloon {
-            if balloon >= mem {
-                println!("--balloon ({} MiB) must be less than --mem ({} MiB)", balloon, mem);
-                std::process::exit(-1);
+            match validate_balloon(balloon, mem) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    println!("{}", e);
+                    std::process::exit(-1);
+                }
             }
-            if balloon < 32 {
-                println!("--balloon ({} MiB) must be at least 32 MiB (boot may fail below this)", balloon);
-                std::process::exit(-1);
-            }
-            Some(balloon)
         } else {
             None
         };
@@ -276,7 +274,7 @@ https://threedots.ovh/blog/2022/06/quick-look-at-rosetta-on-linux/
             net_socket,
             mac_address,
             balloon_target_mb,
-            control_socket: Some(format!("/tmp/krunvm-{}.sock", name)),
+            control_socket: Some(control_socket_path(&name)),
             rootfs_ro: self.rootfs_ro,
             cap_drop,
         };

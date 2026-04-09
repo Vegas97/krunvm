@@ -15,7 +15,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use crate::bindings;
-use crate::utils::{mount_container, parse_mac, umount_container};
+use crate::utils::{balloon_pages, control_socket_path, mount_container, parse_mac, umount_container};
 use crate::{KrunvmConfig, VmConfig};
 
 #[derive(Args, Debug)]
@@ -328,10 +328,7 @@ unsafe fn exec_vm(
     }
 
     if let Some(balloon_mb) = vmcfg.balloon_target_mb {
-        // Balloon initial target: inflate (mem - balloon) worth of pages
-        // so the VM starts with only balloon_mb resident.
-        // Pages are 4KB: 256 pages = 1MB
-        let initial_target = (vmcfg.mem - balloon_mb) * 256;
+        let initial_target = balloon_pages(vmcfg.mem, balloon_mb);
         let ret = bindings::krun_set_balloon_config(ctx, initial_target);
         if ret < 0 {
             println!("Error setting balloon config");
@@ -343,7 +340,7 @@ unsafe fn exec_vm(
     let socket_path = vmcfg
         .control_socket
         .clone()
-        .unwrap_or_else(|| format!("/tmp/krunvm-{}.sock", vmcfg.name));
+        .unwrap_or_else(|| control_socket_path(&vmcfg.name));
     // Clean up stale socket from a previous run
     let _ = std::fs::remove_file(&socket_path);
     let c_socket = CString::new(socket_path.as_str()).unwrap();

@@ -403,6 +403,63 @@ pub fn remove_container(cfg: &KrunvmConfig, vmcfg: &VmConfig) -> Result<(), std:
     Ok(())
 }
 
+// === Balloon utilities ===
+
+/// Validate balloon target against memory size.
+/// Returns Ok(balloon_mb) or Err with a human-readable message.
+pub fn validate_balloon(balloon_mb: u32, mem_mb: u32) -> Result<u32, String> {
+    if balloon_mb >= mem_mb {
+        return Err(format!(
+            "--balloon ({} MiB) must be less than --mem ({} MiB)",
+            balloon_mb, mem_mb
+        ));
+    }
+    if balloon_mb < 32 {
+        return Err(format!(
+            "--balloon ({} MiB) must be at least 32 MiB (boot may fail below this)",
+            balloon_mb
+        ));
+    }
+    Ok(balloon_mb)
+}
+
+/// Calculate the balloon initial target in 4KB pages.
+/// The balloon inflates (mem - balloon) MiB worth of pages so the VM
+/// starts with only `balloon_mb` resident.
+pub fn balloon_pages(mem_mb: u32, balloon_mb: u32) -> u32 {
+    (mem_mb - balloon_mb) * 256
+}
+
+/// Derive the default control socket path for a VM.
+pub fn control_socket_path(vm_name: &str) -> String {
+    format!("/tmp/krunvm-{}.sock", vm_name)
+}
+
+/// Format a balloon_set JSON command.
+pub fn balloon_set_cmd(target_mib: u32) -> String {
+    format!("{{\"cmd\":\"balloon_set\",\"target_mib\":{}}}", target_mib)
+}
+
+/// Format a balloon_stats JSON command.
+pub fn balloon_stats_cmd() -> String {
+    "{\"cmd\":\"balloon_stats\"}".to_string()
+}
+
+/// Parse a balloon_stats JSON response into (actual, target, free) in MiB.
+/// Returns Err with the error string if the response indicates failure.
+pub fn parse_balloon_stats(response: &str) -> Result<(u64, u64, u64), String> {
+    let val: serde_json::Value =
+        serde_json::from_str(response).map_err(|e| format!("Failed to parse response: {}", e))?;
+    if val.get("ok") != Some(&serde_json::Value::Bool(true)) {
+        let err = val["error"].as_str().unwrap_or("unknown error");
+        return Err(err.to_string());
+    }
+    let actual = val["actual_mib"].as_u64().unwrap_or(0);
+    let target = val["target_mib"].as_u64().unwrap_or(0);
+    let free = val["free_mib"].as_u64().unwrap_or(0);
+    Ok((actual, target, free))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +611,142 @@ mod tests {
     #[test]
     fn validate_cap_empty() {
         assert!(validate_capability("").is_err());
+    }
+
+    // === validate_balloon ===
+
+    #[test]
+    fn validate_balloon_valid() {
+        assert_eq!(validate_balloon(64, 192).unwrap(), 64);
+    }
+
+    #[test]
+    fn validate_balloon_equal_to_mem() {
+        let err = validate_balloon(192, 192).unwrap_err();
+        assert!(err.contains("must be less than"));
+    }
+
+    #[test]
+    fn validate_balloon_exceeds_mem() {
+        let err = validate_balloon(256, 192).unwrap_err();
+        assert!(err.contains("must be less than"));
+    }
+
+    #[test]
+    fn validate_balloon_below_minimum() {
+        let err = validate_balloon(16, 192).unwrap_err();
+        assert!(err.contains("at least 32 MiB"));
+    }
+
+    #[test]
+    fn validate_balloon_exact_minimum() {
+        assert_eq!(validate_balloon(32, 192).unwrap(), 32);
+    }
+
+    #[test]
+    fn validate_balloon_one_above_minimum() {
+        assert_eq!(validate_balloon(33, 192).unwrap(), 33);
+    }
+
+    #[test]
+    fn validate_balloon_one_below_mem() {
+        assert_eq!(validate_balloon(191, 192).unwrap(), 191);
+    }
+
+    // === balloon_pages ===
+
+    #[test]
+    fn balloon_pages_standard() {
+        // 192 - 64 = 128 MiB inflated, 128 * 256 = 32768 pages
+        assert_eq!(balloon_pages(192, 64), 32768);
+    }
+
+    #[test]
+    fn balloon_pages_minimal_inflation() {
+        // 192 - 191 = 1 MiB inflated, 1 * 256 = 256 pages
+        assert_eq!(balloon_pages(192, 191), 256);
+    }
+
+    #[test]
+    fn balloon_pages_large_inflation() {
+        // 1024 - 32 = 992 MiB inflated, 992 * 256 = 253952 pages
+        assert_eq!(balloon_pages(1024, 32), 253952);
+    }
+
+    // === control_socket_path ===
+
+    #[test]
+    fn control_socket_path_format() {
+        assert_eq!(
+            control_socket_path("my-vm"),
+            "/tmp/krunvm-my-vm.sock"
+        );
+    }
+
+    #[test]
+    fn control_socket_path_with_special_chars() {
+        assert_eq!(
+            control_socket_path("test_vm-123"),
+            "/tmp/krunvm-test_vm-123.sock"
+        );
+    }
+
+    // === balloon JSON commands ===
+
+    #[test]
+    fn balloon_set_cmd_format() {
+        let cmd = balloon_set_cmd(128);
+        let val: serde_json::Value = serde_json::from_str(&cmd).unwrap();
+        assert_eq!(val["cmd"], "balloon_set");
+        assert_eq!(val["target_mib"], 128);
+    }
+
+    #[test]
+    fn balloon_stats_cmd_format() {
+        let cmd = balloon_stats_cmd();
+        let val: serde_json::Value = serde_json::from_str(&cmd).unwrap();
+        assert_eq!(val["cmd"], "balloon_stats");
+    }
+
+    // === parse_balloon_stats ===
+
+    #[test]
+    fn parse_balloon_stats_success() {
+        let response = r#"{"ok":true,"actual_mib":64,"target_mib":128,"free_mib":12}"#;
+        let (actual, target, free) = parse_balloon_stats(response).unwrap();
+        assert_eq!(actual, 64);
+        assert_eq!(target, 128);
+        assert_eq!(free, 12);
+    }
+
+    #[test]
+    fn parse_balloon_stats_zero_free() {
+        let response = r#"{"ok":true,"actual_mib":64,"target_mib":128,"free_mib":0}"#;
+        let (actual, target, free) = parse_balloon_stats(response).unwrap();
+        assert_eq!(actual, 64);
+        assert_eq!(target, 128);
+        assert_eq!(free, 0);
+    }
+
+    #[test]
+    fn parse_balloon_stats_missing_fields_default_zero() {
+        let response = r#"{"ok":true}"#;
+        let (actual, target, free) = parse_balloon_stats(response).unwrap();
+        assert_eq!(actual, 0);
+        assert_eq!(target, 0);
+        assert_eq!(free, 0);
+    }
+
+    #[test]
+    fn parse_balloon_stats_error_response() {
+        let response = r#"{"ok":false,"error":"balloon device not configured"}"#;
+        let err = parse_balloon_stats(response).unwrap_err();
+        assert_eq!(err, "balloon device not configured");
+    }
+
+    #[test]
+    fn parse_balloon_stats_invalid_json() {
+        let err = parse_balloon_stats("not json").unwrap_err();
+        assert!(err.contains("Failed to parse"));
     }
 }
