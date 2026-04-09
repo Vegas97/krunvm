@@ -43,6 +43,8 @@ pub struct VmConfig {
     #[serde(default)]
     balloon_target_mb: Option<u32>,
     #[serde(default)]
+    control_socket: Option<String>,
+    #[serde(default)]
     rootfs_ro: bool,
     #[serde(default)]
     cap_drop: Vec<String>,

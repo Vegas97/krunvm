@@ -276,6 +276,7 @@ https://threedots.ovh/blog/2022/06/quick-look-at-rosetta-on-linux/
             net_socket,
             mac_address,
             balloon_target_mb,
+            control_socket: Some(format!("/tmp/krunvm-{}.sock", name)),
             rootfs_ro: self.rootfs_ro,
             cap_drop,
         };

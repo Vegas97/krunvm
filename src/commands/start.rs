@@ -339,6 +339,22 @@ unsafe fn exec_vm(
         }
     }
 
+    // Register control socket for runtime balloon commands
+    let socket_path = vmcfg
+        .control_socket
+        .clone()
+        .unwrap_or_else(|| format!("/tmp/krunvm-{}.sock", vmcfg.name));
+    // Clean up stale socket from a previous run
+    let _ = std::fs::remove_file(&socket_path);
+    let c_socket = CString::new(socket_path.as_str()).unwrap();
+    let ret = bindings::krun_set_control_socket(ctx, c_socket.as_ptr());
+    if ret < 0 {
+        eprintln!(
+            "warning: failed to set control socket ({}), balloon commands won't work",
+            ret
+        );
+    }
+
     let ret = bindings::krun_start_enter(ctx);
     if ret < 0 {
         println!("Error starting VM");
