@@ -35,5 +35,12 @@ extern "C" {
         features: u32,
         flags: u32,
     ) -> i32;
-
+    pub fn krun_set_balloon_config(ctx_id: u32, initial_target: u32) -> i32;
+    pub fn krun_set_balloon_target(ctx_id: u32, num_pages: u32) -> i32;
+    pub fn krun_get_balloon_stats(
+        ctx_id: u32,
+        actual: *mut u32,
+        target: *mut u32,
+        free: *mut u32,
+    ) -> i32;
 }
