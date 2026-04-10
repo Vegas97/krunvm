@@ -15,7 +15,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use crate::bindings;
-use crate::utils::{balloon_pages, control_socket_path, mount_container, parse_mac, umount_container};
+use crate::utils::{balloon_pages, control_socket_path, mount_container, parse_mac, shell_escape, umount_container};
 use crate::{KrunvmConfig, VmConfig};
 
 #[derive(Args, Debug)]
@@ -415,10 +415,10 @@ fn write_mount_script(
     writeln!(file, "#!/bin/sh").unwrap();
     writeln!(file, "set -e").unwrap();
     for (tag, guest_path) in mounts {
-        writeln!(file, "mount -t virtiofs {} {}", tag, guest_path).unwrap();
+        writeln!(file, "mount -t virtiofs {} {}", tag, shell_escape(guest_path)).unwrap();
     }
     if !workdir.is_empty() {
-        writeln!(file, "cd \"{}\"", workdir).unwrap();
+        writeln!(file, "cd {}", shell_escape(workdir)).unwrap();
     }
     if cap_drop.is_empty() {
         writeln!(file, "exec \"$@\"").unwrap();
@@ -476,7 +476,7 @@ fn build_capdrop_wrapper(
     writeln!(file, "#!/bin/sh").unwrap();
     writeln!(file, "set -e").unwrap();
     if !workdir.is_empty() {
-        writeln!(file, "cd \"{}\"", workdir).unwrap();
+        writeln!(file, "cd {}", shell_escape(workdir)).unwrap();
     }
     writeln!(file, "CMD=\"$1\"").unwrap();
     writeln!(file, "shift").unwrap();
@@ -532,6 +532,7 @@ fn set_lock(rootfs: &str) -> File {
     file
 }
 
+#[cfg(target_os = "macos")]
 /// Resolve the OCI command from .krun_config.json in the rootfs.
 ///
 /// Follows the OCI runtime spec for combining Entrypoint and Cmd:
@@ -577,6 +578,7 @@ fn resolve_oci_cmd_from_config(rootfs: &str) -> Vec<String> {
     Vec::new()
 }
 
+#[cfg(target_os = "macos")]
 /// Parse a JSON value as a string array, returning empty vec for null/missing/invalid.
 fn parse_string_array(val: Option<&serde_json::Value>) -> Vec<String> {
     val.and_then(|v| v.as_array())

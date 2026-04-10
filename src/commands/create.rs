@@ -274,7 +274,7 @@ https://threedots.ovh/blog/2022/06/quick-look-at-rosetta-on-linux/
             net_socket,
             mac_address,
             balloon_target_mb,
-            control_socket: Some(control_socket_path(&name)),
+            control_socket: balloon_target_mb.map(|_| control_socket_path(&name)),
             rootfs_ro: self.rootfs_ro,
             cap_drop,
         };

@@ -76,6 +76,23 @@ pub fn validate_capability(name: &str) -> Result<String, String> {
     }
 }
 
+/// Escape a string for safe interpolation into a POSIX shell script.
+/// Wraps in single quotes; embedded single quotes become '\\'' (end quote,
+/// escaped literal quote, restart quote).
+pub fn shell_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// Parse a MAC address string "xx:xx:xx:xx:xx:xx" into 6 bytes.
 pub fn parse_mac(s: &str) -> Result<[u8; 6], String> {
     let parts: Vec<&str> = s.split(':').collect();
@@ -87,6 +104,12 @@ pub fn parse_mac(s: &str) -> Result<[u8; 6], String> {
     }
     let mut bytes = [0u8; 6];
     for (i, part) in parts.iter().enumerate() {
+        if part.len() != 2 {
+            return Err(format!(
+                "Invalid MAC address '{}': '{}' must be exactly two hex digits",
+                s, part
+            ));
+        }
         bytes[i] = u8::from_str_radix(part, 16).map_err(|_| {
             format!(
                 "Invalid MAC address '{}': '{}' is not a valid hex byte",
@@ -748,5 +771,88 @@ mod tests {
     fn parse_balloon_stats_invalid_json() {
         let err = parse_balloon_stats("not json").unwrap_err();
         assert!(err.contains("Failed to parse"));
+    }
+
+    // === parse_mac: reject non-canonical octets ===
+
+    #[test]
+    fn parse_mac_rejects_single_digit_octets() {
+        assert!(parse_mac("1:2:3:4:5:6").is_err());
+    }
+
+    #[test]
+    fn parse_mac_rejects_non_canonical_lowercase() {
+        assert!(parse_mac("a:b:c:d:e:f").is_err());
+    }
+
+    #[test]
+    fn parse_mac_accepts_canonical_zero_padded() {
+        assert_eq!(
+            parse_mac("01:02:03:04:05:06").unwrap(),
+            [0x01, 0x02, 0x03, 0x04, 0x05, 0x06]
+        );
+    }
+
+    #[test]
+    fn parse_mac_rejects_three_digit_octet() {
+        assert!(parse_mac("001:02:03:04:05:06").is_err());
+    }
+
+    // === shell_escape ===
+
+    #[test]
+    fn shell_escape_simple_path() {
+        assert_eq!(shell_escape("/usr/local/bin"), "'/usr/local/bin'");
+    }
+
+    #[test]
+    fn shell_escape_path_with_spaces() {
+        assert_eq!(shell_escape("/my path/dir"), "'/my path/dir'");
+    }
+
+    #[test]
+    fn shell_escape_path_with_single_quote() {
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn shell_escape_path_with_double_quote() {
+        assert_eq!(shell_escape("say \"hello\""), "'say \"hello\"'");
+    }
+
+    #[test]
+    fn shell_escape_path_with_dollar() {
+        assert_eq!(shell_escape("/home/$USER"), "'/home/$USER'");
+    }
+
+    #[test]
+    fn shell_escape_path_with_backtick() {
+        assert_eq!(shell_escape("/tmp/`whoami`"), "'/tmp/`whoami`'");
+    }
+
+    #[test]
+    fn shell_escape_path_with_newline() {
+        assert_eq!(shell_escape("/tmp/a\nb"), "'/tmp/a\nb'");
+    }
+
+    #[test]
+    fn shell_escape_empty_string() {
+        assert_eq!(shell_escape(""), "''");
+    }
+
+    // === control_socket: conditional on balloon ===
+
+    #[test]
+    fn control_socket_none_without_balloon() {
+        let balloon: Option<u32> = None;
+        let socket = balloon.map(|_| control_socket_path("test-vm"));
+        assert!(socket.is_none());
+    }
+
+    #[test]
+    fn control_socket_some_with_balloon() {
+        let balloon: Option<u32> = Some(64);
+        let socket = balloon.map(|_| control_socket_path("test-vm"));
+        assert_eq!(socket, Some("/tmp/krunvm-test-vm.sock".to_string()));
     }
 }
