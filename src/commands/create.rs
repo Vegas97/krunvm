@@ -11,7 +11,8 @@ use std::process::Command;
 use crate::utils::{
     control_socket_path, generate_mac, get_buildah_args, mount_container, parse_mac,
     path_pairs_to_hash_map, port_pairs_to_hash_map, umount_container, validate_balloon,
-    validate_capability, BuildahCommand, PathPair, PortPair,
+    validate_capability, validate_socket_path, validate_vm_name_for_socket, BuildahCommand,
+    PathPair, PortPair,
 };
 use crate::{KrunvmConfig, VmConfig, APP_NAME};
 
@@ -154,6 +155,10 @@ impl CreateCmd {
                     .to_string_lossy()
                     .into_owned()
             };
+            validate_socket_path(&net_path).unwrap_or_else(|e| {
+                println!("{}", e);
+                std::process::exit(-1);
+            });
             let mac = match self.mac {
                 Some(ref m) => {
                     let bytes = parse_mac(m).unwrap_or_else(|e| {
@@ -262,6 +267,13 @@ https://threedots.ovh/blog/2022/06/quick-look-at-rosetta-on-linux/
         } else {
             container.to_string()
         };
+        if balloon_target_mb.is_some() {
+            validate_vm_name_for_socket(&name).unwrap_or_else(|e| {
+                println!("{}", e);
+                std::process::exit(-1);
+            });
+        }
+
         let vmcfg = VmConfig {
             name: name.clone(),
             cpus,

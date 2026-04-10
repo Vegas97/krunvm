@@ -458,6 +458,37 @@ pub fn control_socket_path(vm_name: &str) -> String {
     format!("/tmp/krunvm-{}.sock", vm_name)
 }
 
+/// Maximum usable bytes for a unix-domain socket path.
+/// macOS `sun_path` is 104 bytes, Linux is 108. Use the strictest (macOS) minus NUL.
+pub const MAX_SOCKET_PATH_LEN: usize = 103;
+
+/// Validate that a socket path fits within the unix-domain socket limit.
+pub fn validate_socket_path(path: &str) -> Result<(), String> {
+    if path.len() > MAX_SOCKET_PATH_LEN {
+        return Err(format!(
+            "Socket path is too long ({} bytes, max {}): {}",
+            path.len(),
+            MAX_SOCKET_PATH_LEN,
+            path
+        ));
+    }
+    Ok(())
+}
+
+/// Validate that a VM name won't produce an overlong control socket path.
+pub fn validate_vm_name_for_socket(name: &str) -> Result<(), String> {
+    let path = control_socket_path(name);
+    if path.len() > MAX_SOCKET_PATH_LEN {
+        return Err(format!(
+            "VM name '{}' is too long: control socket path would be {} bytes (max {})",
+            name,
+            path.len(),
+            MAX_SOCKET_PATH_LEN
+        ));
+    }
+    Ok(())
+}
+
 /// Format a balloon_set JSON command.
 pub fn balloon_set_cmd(target_mib: u32) -> String {
     format!("{{\"cmd\":\"balloon_set\",\"target_mib\":{}}}", target_mib)
@@ -854,5 +885,52 @@ mod tests {
         let balloon: Option<u32> = Some(64);
         let socket = balloon.map(|_| control_socket_path("test-vm"));
         assert_eq!(socket, Some("/tmp/krunvm-test-vm.sock".to_string()));
+    }
+
+    // === validate_socket_path ===
+
+    #[test]
+    fn validate_socket_path_short() {
+        assert!(validate_socket_path("/tmp/net.sock").is_ok());
+    }
+
+    #[test]
+    fn validate_socket_path_exact_limit() {
+        let path = "a".repeat(MAX_SOCKET_PATH_LEN);
+        assert!(validate_socket_path(&path).is_ok());
+    }
+
+    #[test]
+    fn validate_socket_path_over_limit() {
+        let path = "a".repeat(MAX_SOCKET_PATH_LEN + 1);
+        assert!(validate_socket_path(&path).is_err());
+    }
+
+    #[test]
+    fn validate_socket_path_way_over() {
+        let path = "a".repeat(200);
+        assert!(validate_socket_path(&path).is_err());
+    }
+
+    // === validate_vm_name_for_socket ===
+
+    #[test]
+    fn validate_vm_name_short() {
+        assert!(validate_vm_name_for_socket("my-vm").is_ok());
+    }
+
+    #[test]
+    fn validate_vm_name_too_long() {
+        // /tmp/krunvm- (12) + name + .sock (5) = 17 overhead
+        // 87 + 17 = 104 > 103
+        let name = "a".repeat(87);
+        assert!(validate_vm_name_for_socket(&name).is_err());
+    }
+
+    #[test]
+    fn validate_vm_name_exact_limit() {
+        // 86 + 17 = 103 = MAX_SOCKET_PATH_LEN
+        let name = "a".repeat(86);
+        assert!(validate_vm_name_for_socket(&name).is_ok());
     }
 }

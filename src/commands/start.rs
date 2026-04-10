@@ -13,6 +13,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 #[cfg(target_os = "macos")]
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static SIGNAL_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 use crate::bindings;
 use crate::utils::{balloon_pages, control_socket_path, mount_container, parse_mac, shell_escape, umount_container};
@@ -41,6 +44,10 @@ pub struct StartCmd {
     /// env(s) in format "key=value" to be exposed to the VM
     #[arg(long = "env")]
     envs: Option<Vec<String>>,
+
+    /// Maximum time in seconds the VM is allowed to run (0 = no limit)
+    #[arg(long)]
+    timeout: Option<u64>,
 }
 
 impl StartCmd {
@@ -74,6 +81,13 @@ impl StartCmd {
         };
 
         set_rlimits();
+        install_signal_handlers();
+
+        if let Some(secs) = self.timeout {
+            if secs > 0 {
+                spawn_watchdog(secs);
+            }
+        }
 
         let _file = set_lock(&rootfs);
 
@@ -499,6 +513,27 @@ fn build_capdrop_wrapper(
     exec_args.extend(args.iter().cloned());
 
     (CString::new(guest_path).unwrap(), exec_args)
+}
+
+extern "C" fn signal_handler(sig: libc::c_int) {
+    SIGNAL_RECEIVED.store(true, Ordering::Relaxed);
+    unsafe { libc::_exit(128 + sig) };
+}
+
+fn install_signal_handlers() {
+    unsafe {
+        libc::signal(libc::SIGTERM, signal_handler as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, signal_handler as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, signal_handler as *const () as libc::sighandler_t);
+    }
+}
+
+fn spawn_watchdog(timeout_secs: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(timeout_secs));
+        eprintln!("krunvm: timeout after {} seconds, forcing exit", timeout_secs);
+        unsafe { libc::_exit(124) };
+    });
 }
 
 fn set_rlimits() {

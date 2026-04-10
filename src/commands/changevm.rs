@@ -5,7 +5,8 @@ use clap::Args;
 use std::collections::HashMap;
 
 use crate::utils::{
-    path_pairs_to_hash_map, port_pairs_to_hash_map, validate_capability, PathPair, PortPair,
+    control_socket_path, path_pairs_to_hash_map, port_pairs_to_hash_map, validate_capability,
+    validate_vm_name_for_socket, PathPair, PortPair,
 };
 use crate::{KrunvmConfig, APP_NAME};
 
@@ -86,7 +87,20 @@ impl ChangeVmCmd {
 
             cfg_changed = true;
             let name = new_name.to_string();
+
+            // Validate socket path length if balloon is configured
+            if vmcfg.balloon_target_mb.is_some() {
+                validate_vm_name_for_socket(&name).unwrap_or_else(|e| {
+                    println!("{}", e);
+                    std::process::exit(-1);
+                });
+            }
+
             vmcfg.name = name.clone();
+            // Regenerate control socket path for the new name
+            vmcfg.control_socket = vmcfg
+                .balloon_target_mb
+                .map(|_| control_socket_path(&name));
             cfg.vmconfig_map.insert(name.clone(), vmcfg);
             cfg.vmconfig_map.get_mut(&name).unwrap()
         } else {
