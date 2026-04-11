@@ -9,8 +9,10 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::utils::{
-    get_buildah_args, mount_container, path_pairs_to_hash_map, port_pairs_to_hash_map,
-    umount_container, BuildahCommand, PathPair, PortPair,
+    control_socket_path, generate_mac, get_buildah_args, mount_container, parse_mac,
+    path_pairs_to_hash_map, port_pairs_to_hash_map, umount_container, validate_balloon,
+    validate_capability, validate_socket_path, validate_vm_name_for_socket, BuildahCommand,
+    PathPair, PortPair,
 };
 use crate::{KrunvmConfig, VmConfig, APP_NAME};
 
@@ -51,6 +53,40 @@ pub struct CreateCmd {
     #[arg(long = "port")]
     ports: Vec<PortPair>,
 
+    /// Path to gvproxy unix socket (enables virtio-net networking).
+    /// Mutually exclusive with --port (TSI networking).
+    #[arg(long)]
+    net: Option<String>,
+
+    /// VM MAC address (format: xx:xx:xx:xx:xx:xx). Only valid with --net.
+    /// When --net is specified without --mac, a random locally-administered
+    /// unicast MAC is generated. This matches krunvm's UX pattern of sensible
+    /// defaults (like auto-naming VMs and defaulting CPUs/RAM/DNS).
+    /// krunkit requires an explicit MAC, but krunvm targets a higher-level
+    /// audience where "just works" matters more than explicit control.
+    /// Users who need deterministic MACs (e.g., static DHCP leases in
+    /// gvproxy) can still pass --mac explicitly.
+    #[arg(long)]
+    mac: Option<String>,
+
+    /// Balloon inflation target in MiB. The balloon inflates this many MiB
+    /// at boot, so the VM starts with (mem - balloon) MiB resident.
+    /// Must be > 0, < --mem, and leave at least 32 MiB resident.
+    #[arg(long)]
+    balloon: Option<u32>,
+
+    /// Mount the root filesystem as read-only at the hypervisor level.
+    /// The guest kernel physically cannot write to the rootfs.
+    #[arg(long)]
+    rootfs_ro: bool,
+
+    /// Linux capabilities to drop inside the guest VM.
+    /// Accepts names like CAP_NET_RAW, cap_net_raw, or net_raw.
+    /// Repeat for multiple capabilities (e.g., --cap-drop CAP_NET_RAW --cap-drop CAP_SYS_ADMIN).
+    /// Requires capsh in the guest rootfs (libcap on most distros, libcap-utils on Alpine).
+    #[arg(long = "cap-drop")]
+    cap_drop: Vec<String>,
+
     /// Create a x86_64 microVM even on an Aarch64 host
     #[arg(short, long)]
     #[cfg(target_os = "macos")]
@@ -68,6 +104,81 @@ impl CreateCmd {
         let mapped_ports = port_pairs_to_hash_map(self.ports);
         let image = self.image;
         let name = self.name;
+
+        // Validate --balloon
+        let balloon_target_mb = if let Some(balloon) = self.balloon {
+            match validate_balloon(balloon, mem) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    println!("{}", e);
+                    std::process::exit(-1);
+                }
+            }
+        } else {
+            None
+        };
+
+        // Validate and normalize --cap-drop values
+        let cap_drop: Vec<String> = self
+            .cap_drop
+            .iter()
+            .map(|c| {
+                validate_capability(c).unwrap_or_else(|e| {
+                    println!("{}", e);
+                    std::process::exit(-1);
+                })
+            })
+            .collect();
+
+        // Validate --net / --port / --mac interactions
+        if self.mac.is_some() && self.net.is_none() {
+            println!("--mac requires --net");
+            std::process::exit(-1);
+        }
+        if self.net.is_some() && !mapped_ports.is_empty() {
+            println!("--net and --port are mutually exclusive");
+            std::process::exit(-1);
+        }
+
+        // Resolve MAC: use provided value or generate a random one
+        let (net_socket, mac_address) = if let Some(ref net_path) = self.net {
+            let net_path = if std::path::Path::new(net_path).is_absolute() {
+                net_path.clone()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|e| {
+                        println!("Error resolving current directory: {}", e);
+                        std::process::exit(-1);
+                    })
+                    .join(net_path)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            validate_socket_path(&net_path).unwrap_or_else(|e| {
+                println!("{}", e);
+                std::process::exit(-1);
+            });
+            let mac = match self.mac {
+                Some(ref m) => {
+                    let bytes = parse_mac(m).unwrap_or_else(|e| {
+                        println!("{}", e);
+                        std::process::exit(-1);
+                    });
+                    if bytes == [0; 6] || bytes == [0xff; 6] || (bytes[0] & 0x01) != 0 {
+                        println!(
+                            "Invalid MAC address '{}': expected a unicast, non-zero, non-broadcast address",
+                            m
+                        );
+                        std::process::exit(-1);
+                    }
+                    m.clone()
+                }
+                None => generate_mac(),
+            };
+            (Some(net_path), Some(mac))
+        } else {
+            (None, None)
+        };
 
         if let Some(ref name) = name {
             if name.is_empty() {
@@ -155,6 +266,13 @@ https://threedots.ovh/blog/2022/06/quick-look-at-rosetta-on-linux/
         } else {
             container.to_string()
         };
+        if balloon_target_mb.is_some() {
+            validate_vm_name_for_socket(&name).unwrap_or_else(|e| {
+                println!("{}", e);
+                std::process::exit(-1);
+            });
+        }
+
         let vmcfg = VmConfig {
             name: name.clone(),
             cpus,
@@ -164,6 +282,12 @@ https://threedots.ovh/blog/2022/06/quick-look-at-rosetta-on-linux/
             workdir: workdir.to_string(),
             mapped_volumes,
             mapped_ports,
+            net_socket,
+            mac_address,
+            balloon_target_mb,
+            control_socket: balloon_target_mb.map(|_| control_socket_path(&name)),
+            rootfs_ro: self.rootfs_ro,
+            cap_drop,
         };
 
         let rootfs = mount_container(cfg, &vmcfg).unwrap();

@@ -4,7 +4,10 @@
 use clap::Args;
 use std::collections::HashMap;
 
-use crate::utils::{path_pairs_to_hash_map, port_pairs_to_hash_map, PathPair, PortPair};
+use crate::utils::{
+    control_socket_path, path_pairs_to_hash_map, port_pairs_to_hash_map, validate_capability,
+    validate_vm_name_for_socket, PathPair, PortPair,
+};
 use crate::{KrunvmConfig, APP_NAME};
 
 use super::list::printvm;
@@ -46,6 +49,22 @@ pub struct ChangeVmCmd {
     /// Port(s) in format "host_port:guest_port" to be exposed to the host
     #[arg(long = "port")]
     ports: Vec<PortPair>,
+
+    /// Mount the root filesystem as read-only
+    #[arg(long)]
+    rootfs_ro: bool,
+
+    /// Remove read-only rootfs setting
+    #[arg(long)]
+    remove_rootfs_ro: bool,
+
+    /// Remove all capability drop rules
+    #[arg(long)]
+    remove_cap_drop: bool,
+
+    /// Linux capabilities to drop inside the guest VM
+    #[arg(long = "cap-drop")]
+    cap_drop: Vec<String>,
 }
 
 impl ChangeVmCmd {
@@ -68,7 +87,20 @@ impl ChangeVmCmd {
 
             cfg_changed = true;
             let name = new_name.to_string();
+
+            // Validate socket path length if balloon is configured
+            if vmcfg.balloon_target_mb.is_some() {
+                validate_vm_name_for_socket(&name).unwrap_or_else(|e| {
+                    println!("{}", e);
+                    std::process::exit(-1);
+                });
+            }
+
             vmcfg.name = name.clone();
+            // Regenerate control socket path for the new name
+            vmcfg.control_socket = vmcfg
+                .balloon_target_mb
+                .map(|_| control_socket_path(&name));
             cfg.vmconfig_map.insert(name.clone(), vmcfg);
             cfg.vmconfig_map.get_mut(&name).unwrap()
         } else {
@@ -127,6 +159,32 @@ impl ChangeVmCmd {
 
         if let Some(workdir) = self.workdir {
             vmcfg.workdir = workdir.to_string();
+            cfg_changed = true;
+        }
+
+        if self.rootfs_ro {
+            vmcfg.rootfs_ro = true;
+            cfg_changed = true;
+        } else if self.remove_rootfs_ro {
+            vmcfg.rootfs_ro = false;
+            cfg_changed = true;
+        }
+
+        if self.remove_cap_drop {
+            vmcfg.cap_drop = Vec::new();
+            cfg_changed = true;
+        } else if !self.cap_drop.is_empty() {
+            let validated: Vec<String> = self
+                .cap_drop
+                .iter()
+                .map(|c| {
+                    validate_capability(c).unwrap_or_else(|e| {
+                        println!("{}", e);
+                        std::process::exit(-1);
+                    })
+                })
+                .collect();
+            vmcfg.cap_drop = validated;
             cfg_changed = true;
         }
 
