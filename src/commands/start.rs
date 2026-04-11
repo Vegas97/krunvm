@@ -342,7 +342,7 @@ unsafe fn exec_vm(
     }
 
     if let Some(balloon_mb) = vmcfg.balloon_target_mb {
-        let initial_target = balloon_pages(vmcfg.mem, balloon_mb);
+        let initial_target = balloon_pages(balloon_mb);
         let ret = bindings::krun_set_balloon_config(ctx, initial_target);
         if ret < 0 {
             println!("Error setting balloon config");

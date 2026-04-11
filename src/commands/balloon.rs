@@ -16,7 +16,7 @@ pub struct BalloonCmd {
     /// Name of the microVM
     name: String,
 
-    /// Set balloon target in MiB (VM keeps this much resident memory)
+    /// Set balloon inflation target in MiB (how much memory to reclaim from VM)
     #[arg(long)]
     target: Option<u32>,
 

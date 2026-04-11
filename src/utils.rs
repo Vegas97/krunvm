@@ -431,26 +431,29 @@ pub fn remove_container(cfg: &KrunvmConfig, vmcfg: &VmConfig) -> Result<(), std:
 /// Validate balloon target against memory size.
 /// Returns Ok(balloon_mb) or Err with a human-readable message.
 pub fn validate_balloon(balloon_mb: u32, mem_mb: u32) -> Result<u32, String> {
+    if balloon_mb == 0 {
+        return Err("--balloon must be greater than 0 MiB".to_string());
+    }
     if balloon_mb >= mem_mb {
         return Err(format!(
             "--balloon ({} MiB) must be less than --mem ({} MiB)",
             balloon_mb, mem_mb
         ));
     }
-    if balloon_mb < 32 {
+    if mem_mb - balloon_mb < 32 {
         return Err(format!(
-            "--balloon ({} MiB) must be at least 32 MiB (boot may fail below this)",
-            balloon_mb
+            "--balloon ({} MiB) leaves only {} MiB resident; the VM needs at least 32 MiB to boot",
+            balloon_mb,
+            mem_mb - balloon_mb
         ));
     }
     Ok(balloon_mb)
 }
 
 /// Calculate the balloon initial target in 4KB pages.
-/// The balloon inflates (mem - balloon) MiB worth of pages so the VM
-/// starts with only `balloon_mb` resident.
-pub fn balloon_pages(mem_mb: u32, balloon_mb: u32) -> u32 {
-    (mem_mb - balloon_mb) * 256
+/// The balloon inflates `balloon_mb` MiB worth of pages.
+pub fn balloon_pages(balloon_mb: u32) -> u32 {
+    balloon_mb * 256
 }
 
 /// Derive the default control socket path for a VM.
@@ -687,44 +690,52 @@ mod tests {
     }
 
     #[test]
-    fn validate_balloon_below_minimum() {
-        let err = validate_balloon(16, 192).unwrap_err();
-        assert!(err.contains("at least 32 MiB"));
+    fn validate_balloon_zero() {
+        let err = validate_balloon(0, 192).unwrap_err();
+        assert!(err.contains("greater than 0"));
     }
 
     #[test]
-    fn validate_balloon_exact_minimum() {
+    fn validate_balloon_leaves_too_little_resident() {
+        // 191 out of 192 → only 1 MiB resident
+        let err = validate_balloon(191, 192).unwrap_err();
+        assert!(err.contains("at least 32 MiB to boot"));
+    }
+
+    #[test]
+    fn validate_balloon_leaves_exact_minimum() {
+        // 160 out of 192 → 32 MiB resident (minimum)
+        assert_eq!(validate_balloon(160, 192).unwrap(), 160);
+    }
+
+    #[test]
+    fn validate_balloon_small_inflation() {
         assert_eq!(validate_balloon(32, 192).unwrap(), 32);
     }
 
     #[test]
-    fn validate_balloon_one_above_minimum() {
-        assert_eq!(validate_balloon(33, 192).unwrap(), 33);
-    }
-
-    #[test]
-    fn validate_balloon_one_below_mem() {
-        assert_eq!(validate_balloon(191, 192).unwrap(), 191);
+    fn validate_balloon_one_above_zero() {
+        assert_eq!(validate_balloon(1, 192).unwrap(), 1);
     }
 
     // === balloon_pages ===
 
     #[test]
     fn balloon_pages_standard() {
-        // 192 - 64 = 128 MiB inflated, 128 * 256 = 32768 pages
-        assert_eq!(balloon_pages(192, 64), 32768);
+        // 64 MiB inflated, 64 * 256 = 16384 pages
+        assert_eq!(balloon_pages(64), 16384);
     }
 
     #[test]
     fn balloon_pages_minimal_inflation() {
-        // 192 - 191 = 1 MiB inflated, 1 * 256 = 256 pages
-        assert_eq!(balloon_pages(192, 191), 256);
+        // 1 MiB inflated, 1 * 256 = 256 pages
+        assert_eq!(balloon_pages(1), 256);
     }
 
     #[test]
     fn balloon_pages_large_inflation() {
-        // 1024 - 32 = 992 MiB inflated, 992 * 256 = 253952 pages
-        assert_eq!(balloon_pages(1024, 32), 253952);
+        // 992 MiB inflated, 992 * 256 = 253952 pages
+        assert_eq!(balloon_pages(992), 253952);
     }
 
     // === control_socket_path ===

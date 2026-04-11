@@ -69,10 +69,9 @@ pub struct CreateCmd {
     #[arg(long)]
     mac: Option<String>,
 
-    /// Initial memory balloon target in MiB. The VM is allocated --mem MiB
-    /// but the balloon inflates to reclaim (mem - balloon) MiB at boot,
-    /// so the VM starts with only this many MiB resident. Must be < --mem
-    /// and >= 32.
+    /// Balloon inflation target in MiB. The balloon inflates this many MiB
+    /// at boot, so the VM starts with (mem - balloon) MiB resident.
+    /// Must be > 0, < --mem, and leave at least 32 MiB resident.
     #[arg(long)]
     balloon: Option<u32>,
 
