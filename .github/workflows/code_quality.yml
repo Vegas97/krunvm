@@ -31,9 +31,12 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup build environment
         uses: ./.github/actions/setup-build-env
-      
+
       - name: Clippy
         run: cargo clippy --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked

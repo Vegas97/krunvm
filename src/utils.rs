@@ -2,11 +2,144 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 use std::str::FromStr;
 
 use crate::{KrunvmConfig, VmConfig, APP_NAME};
+
+/// Linux capabilities that can be dropped inside the guest VM.
+/// Names follow the kernel convention (lowercase, no "cap_" prefix stored).
+const VALID_CAPABILITIES: &[&str] = &[
+    "audit_control",
+    "audit_read",
+    "audit_write",
+    "block_suspend",
+    "bpf",
+    "checkpoint_restore",
+    "chown",
+    "dac_override",
+    "dac_read_search",
+    "fowner",
+    "fsetid",
+    "ipc_lock",
+    "ipc_owner",
+    "kill",
+    "lease",
+    "linux_immutable",
+    "mac_admin",
+    "mac_override",
+    "mknod",
+    "net_admin",
+    "net_bind_service",
+    "net_broadcast",
+    "net_raw",
+    "perfmon",
+    "setfcap",
+    "setgid",
+    "setpcap",
+    "setuid",
+    "sys_admin",
+    "sys_boot",
+    "sys_chroot",
+    "sys_module",
+    "sys_nice",
+    "sys_pacct",
+    "sys_ptrace",
+    "sys_rawio",
+    "sys_resource",
+    "sys_time",
+    "sys_tty_config",
+    "syslog",
+    "wake_alarm",
+];
+
+/// Normalize and validate a capability name.
+/// Accepts "CAP_NET_RAW", "cap_net_raw", or "net_raw" — returns "net_raw".
+pub fn validate_capability(name: &str) -> Result<String, String> {
+    let normalized = name.to_lowercase();
+    let stripped = normalized.strip_prefix("cap_").unwrap_or(&normalized);
+    if VALID_CAPABILITIES.contains(&stripped) {
+        Ok(stripped.to_string())
+    } else {
+        Err(format!(
+            "Unknown capability '{}'. Valid capabilities: {}",
+            name,
+            VALID_CAPABILITIES
+                .iter()
+                .map(|c| format!("cap_{}", c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+}
+
+/// Escape a string for safe interpolation into a POSIX shell script.
+/// Wraps in single quotes; embedded single quotes become '\\'' (end quote,
+/// escaped literal quote, restart quote).
+pub fn shell_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Parse a MAC address string "xx:xx:xx:xx:xx:xx" into 6 bytes.
+pub fn parse_mac(s: &str) -> Result<[u8; 6], String> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        return Err(format!(
+            "Invalid MAC address '{}': expected 6 colon-separated hex pairs",
+            s
+        ));
+    }
+    let mut bytes = [0u8; 6];
+    for (i, part) in parts.iter().enumerate() {
+        if part.len() != 2 {
+            return Err(format!(
+                "Invalid MAC address '{}': '{}' must be exactly two hex digits",
+                s, part
+            ));
+        }
+        bytes[i] = u8::from_str_radix(part, 16).map_err(|_| {
+            format!(
+                "Invalid MAC address '{}': '{}' is not a valid hex byte",
+                s, part
+            )
+        })?;
+    }
+    Ok(bytes)
+}
+
+/// Generate a random locally-administered unicast MAC address.
+///
+/// When --net is specified without --mac, a random MAC is generated.
+/// This matches krunvm's UX pattern of sensible defaults (like auto-naming
+/// VMs and defaulting CPUs/RAM/DNS). krunkit requires an explicit MAC,
+/// but krunvm targets a higher-level audience where "just works" matters
+/// more than explicit control. Users who need deterministic MACs (e.g.,
+/// static DHCP leases in gvproxy) can still pass --mac explicitly.
+pub fn generate_mac() -> String {
+    let mut bytes = [0u8; 6];
+    let mut f = File::open("/dev/urandom").expect("Failed to open /dev/urandom");
+    f.read_exact(&mut bytes)
+        .expect("Failed to read from /dev/urandom");
+    // Set locally-administered bit (bit 1) and clear multicast bit (bit 0)
+    bytes[0] = (bytes[0] | 0x02) & 0xfe;
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
+    )
+}
 
 pub enum BuildahCommand {
     From,
@@ -291,4 +424,524 @@ pub fn remove_container(cfg: &KrunvmConfig, vmcfg: &VmConfig) -> Result<(), std:
     }
 
     Ok(())
+}
+
+// === Balloon utilities ===
+
+/// Validate balloon target against memory size.
+/// Returns Ok(balloon_mb) or Err with a human-readable message.
+pub fn validate_balloon(balloon_mb: u32, mem_mb: u32) -> Result<u32, String> {
+    if balloon_mb == 0 {
+        return Err("--balloon must be greater than 0 MiB".to_string());
+    }
+    if balloon_mb >= mem_mb {
+        return Err(format!(
+            "--balloon ({} MiB) must be less than --mem ({} MiB)",
+            balloon_mb, mem_mb
+        ));
+    }
+    if mem_mb - balloon_mb < 32 {
+        return Err(format!(
+            "--balloon ({} MiB) leaves only {} MiB resident; the VM needs at least 32 MiB to boot",
+            balloon_mb,
+            mem_mb - balloon_mb
+        ));
+    }
+    Ok(balloon_mb)
+}
+
+/// Calculate the balloon initial target in 4KB pages.
+/// The balloon inflates `balloon_mb` MiB worth of pages.
+pub fn balloon_pages(balloon_mb: u32) -> u32 {
+    balloon_mb * 256
+}
+
+/// Derive the default control socket path for a VM.
+pub fn control_socket_path(vm_name: &str) -> String {
+    format!("/tmp/krunvm-{}.sock", vm_name)
+}
+
+/// Maximum usable bytes for a unix-domain socket path.
+/// macOS `sun_path` is 104 bytes, Linux is 108. Use the strictest (macOS) minus NUL.
+pub const MAX_SOCKET_PATH_LEN: usize = 103;
+
+/// Validate that a socket path fits within the unix-domain socket limit.
+pub fn validate_socket_path(path: &str) -> Result<(), String> {
+    if path.len() > MAX_SOCKET_PATH_LEN {
+        return Err(format!(
+            "Socket path is too long ({} bytes, max {}): {}",
+            path.len(),
+            MAX_SOCKET_PATH_LEN,
+            path
+        ));
+    }
+    Ok(())
+}
+
+/// Validate that a VM name won't produce an overlong control socket path.
+pub fn validate_vm_name_for_socket(name: &str) -> Result<(), String> {
+    let path = control_socket_path(name);
+    if path.len() > MAX_SOCKET_PATH_LEN {
+        return Err(format!(
+            "VM name '{}' is too long: control socket path would be {} bytes (max {})",
+            name,
+            path.len(),
+            MAX_SOCKET_PATH_LEN
+        ));
+    }
+    Ok(())
+}
+
+/// Format a balloon_set JSON command.
+pub fn balloon_set_cmd(target_mib: u32) -> String {
+    format!("{{\"cmd\":\"balloon_set\",\"target_mib\":{}}}", target_mib)
+}
+
+/// Format a balloon_stats JSON command.
+pub fn balloon_stats_cmd() -> String {
+    "{\"cmd\":\"balloon_stats\"}".to_string()
+}
+
+/// Parse a balloon_stats JSON response into (actual, target, free) in MiB.
+/// Returns Err with the error string if the response indicates failure.
+pub fn parse_balloon_stats(response: &str) -> Result<(u64, u64, u64), String> {
+    let val: serde_json::Value =
+        serde_json::from_str(response).map_err(|e| format!("Failed to parse response: {}", e))?;
+    if val.get("ok") != Some(&serde_json::Value::Bool(true)) {
+        let err = val["error"].as_str().unwrap_or("unknown error");
+        return Err(err.to_string());
+    }
+    let actual = val["actual_mib"].as_u64().unwrap_or(0);
+    let target = val["target_mib"].as_u64().unwrap_or(0);
+    let free = val["free_mib"].as_u64().unwrap_or(0);
+    Ok((actual, target, free))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // === parse_mac ===
+
+    #[test]
+    fn parse_mac_valid_lowercase() {
+        assert_eq!(
+            parse_mac("aa:bb:cc:dd:ee:ff").unwrap(),
+            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+        );
+    }
+
+    #[test]
+    fn parse_mac_valid_all_zeros() {
+        assert_eq!(parse_mac("00:00:00:00:00:00").unwrap(), [0; 6]);
+    }
+
+    #[test]
+    fn parse_mac_valid_uppercase() {
+        assert_eq!(
+            parse_mac("AA:BB:CC:DD:EE:FF").unwrap(),
+            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+        );
+    }
+
+    #[test]
+    fn parse_mac_invalid_garbage() {
+        let err = parse_mac("ZZZZ").unwrap_err();
+        assert!(err.contains("expected 6"));
+    }
+
+    #[test]
+    fn parse_mac_too_few_pairs() {
+        let err = parse_mac("aa:bb:cc").unwrap_err();
+        assert!(err.contains("expected 6"));
+    }
+
+    #[test]
+    fn parse_mac_invalid_hex_byte() {
+        let err = parse_mac("gg:bb:cc:dd:ee:ff").unwrap_err();
+        assert!(err.contains("'gg'"));
+    }
+
+    #[test]
+    fn parse_mac_too_many_pairs() {
+        let err = parse_mac("aa:bb:cc:dd:ee:ff:00").unwrap_err();
+        assert!(err.contains("expected 6"));
+    }
+
+    // === generate_mac ===
+
+    #[test]
+    fn generate_mac_format() {
+        let mac = generate_mac();
+        assert_eq!(mac.len(), 17);
+        assert_eq!(mac.matches(':').count(), 5);
+    }
+
+    #[test]
+    fn generate_mac_locally_administered_bit() {
+        let mac = generate_mac();
+        let first_byte = u8::from_str_radix(&mac[..2], 16).unwrap();
+        assert_eq!(first_byte & 0x02, 0x02);
+    }
+
+    #[test]
+    fn generate_mac_unicast_bit() {
+        let mac = generate_mac();
+        let first_byte = u8::from_str_radix(&mac[..2], 16).unwrap();
+        assert_eq!(first_byte & 0x01, 0x00);
+    }
+
+    #[test]
+    fn generate_mac_roundtrip() {
+        let mac = generate_mac();
+        assert!(parse_mac(&mac).is_ok());
+    }
+
+    // === PortPair::from_str ===
+
+    #[test]
+    fn port_pair_valid() {
+        let pair: PortPair = "8080:80".parse().unwrap();
+        assert_eq!(pair.host_port, "8080");
+        assert_eq!(pair.guest_port, "80");
+    }
+
+    #[test]
+    fn port_pair_invalid_host() {
+        assert!("abc:80".parse::<PortPair>().is_err());
+    }
+
+    #[test]
+    fn port_pair_too_many_separators() {
+        assert!("80:80:80".parse::<PortPair>().is_err());
+    }
+
+    // === PathPair::from_str ===
+
+    #[test]
+    fn path_pair_valid() {
+        let pair: PathPair = "/tmp:/guest".parse().unwrap();
+        assert_eq!(pair.host_path, "/tmp");
+        assert_eq!(pair.guest_path, "/guest");
+    }
+
+    #[test]
+    fn path_pair_relative_host() {
+        let err = "relative:/guest".parse::<PathPair>().unwrap_err();
+        assert!(err.contains("not an absolute"));
+    }
+
+    #[test]
+    fn path_pair_guest_too_deep() {
+        let err = "/tmp:/a/b/c".parse::<PathPair>().unwrap_err();
+        assert!(err.contains("single direct root"));
+    }
+
+    // === validate_capability ===
+
+    #[test]
+    fn validate_cap_uppercase_with_prefix() {
+        assert_eq!(validate_capability("CAP_NET_RAW").unwrap(), "net_raw");
+    }
+
+    #[test]
+    fn validate_cap_lowercase_with_prefix() {
+        assert_eq!(validate_capability("cap_sys_admin").unwrap(), "sys_admin");
+    }
+
+    #[test]
+    fn validate_cap_without_prefix() {
+        assert_eq!(validate_capability("sys_ptrace").unwrap(), "sys_ptrace");
+    }
+
+    #[test]
+    fn validate_cap_mixed_case() {
+        assert_eq!(validate_capability("Cap_Net_Raw").unwrap(), "net_raw");
+    }
+
+    #[test]
+    fn validate_cap_unknown() {
+        let err = validate_capability("CAP_DOES_NOT_EXIST").unwrap_err();
+        assert!(err.contains("Unknown capability"));
+    }
+
+    #[test]
+    fn validate_cap_empty() {
+        assert!(validate_capability("").is_err());
+    }
+
+    // === validate_balloon ===
+
+    #[test]
+    fn validate_balloon_valid() {
+        assert_eq!(validate_balloon(64, 192).unwrap(), 64);
+    }
+
+    #[test]
+    fn validate_balloon_equal_to_mem() {
+        let err = validate_balloon(192, 192).unwrap_err();
+        assert!(err.contains("must be less than"));
+    }
+
+    #[test]
+    fn validate_balloon_exceeds_mem() {
+        let err = validate_balloon(256, 192).unwrap_err();
+        assert!(err.contains("must be less than"));
+    }
+
+    #[test]
+    fn validate_balloon_zero() {
+        let err = validate_balloon(0, 192).unwrap_err();
+        assert!(err.contains("greater than 0"));
+    }
+
+    #[test]
+    fn validate_balloon_leaves_too_little_resident() {
+        // 191 out of 192 → only 1 MiB resident
+        let err = validate_balloon(191, 192).unwrap_err();
+        assert!(err.contains("at least 32 MiB to boot"));
+    }
+
+    #[test]
+    fn validate_balloon_leaves_exact_minimum() {
+        // 160 out of 192 → 32 MiB resident (minimum)
+        assert_eq!(validate_balloon(160, 192).unwrap(), 160);
+    }
+
+    #[test]
+    fn validate_balloon_small_inflation() {
+        assert_eq!(validate_balloon(32, 192).unwrap(), 32);
+    }
+
+    #[test]
+    fn validate_balloon_one_above_zero() {
+        assert_eq!(validate_balloon(1, 192).unwrap(), 1);
+    }
+
+    // === balloon_pages ===
+
+    #[test]
+    fn balloon_pages_standard() {
+        // 64 MiB inflated, 64 * 256 = 16384 pages
+        assert_eq!(balloon_pages(64), 16384);
+    }
+
+    #[test]
+    fn balloon_pages_minimal_inflation() {
+        // 1 MiB inflated, 1 * 256 = 256 pages
+        assert_eq!(balloon_pages(1), 256);
+    }
+
+    #[test]
+    fn balloon_pages_large_inflation() {
+        // 992 MiB inflated, 992 * 256 = 253952 pages
+        assert_eq!(balloon_pages(992), 253952);
+    }
+
+    // === control_socket_path ===
+
+    #[test]
+    fn control_socket_path_format() {
+        assert_eq!(
+            control_socket_path("my-vm"),
+            "/tmp/krunvm-my-vm.sock"
+        );
+    }
+
+    #[test]
+    fn control_socket_path_with_special_chars() {
+        assert_eq!(
+            control_socket_path("test_vm-123"),
+            "/tmp/krunvm-test_vm-123.sock"
+        );
+    }
+
+    // === balloon JSON commands ===
+
+    #[test]
+    fn balloon_set_cmd_format() {
+        let cmd = balloon_set_cmd(128);
+        let val: serde_json::Value = serde_json::from_str(&cmd).unwrap();
+        assert_eq!(val["cmd"], "balloon_set");
+        assert_eq!(val["target_mib"], 128);
+    }
+
+    #[test]
+    fn balloon_stats_cmd_format() {
+        let cmd = balloon_stats_cmd();
+        let val: serde_json::Value = serde_json::from_str(&cmd).unwrap();
+        assert_eq!(val["cmd"], "balloon_stats");
+    }
+
+    // === parse_balloon_stats ===
+
+    #[test]
+    fn parse_balloon_stats_success() {
+        let response = r#"{"ok":true,"actual_mib":64,"target_mib":128,"free_mib":12}"#;
+        let (actual, target, free) = parse_balloon_stats(response).unwrap();
+        assert_eq!(actual, 64);
+        assert_eq!(target, 128);
+        assert_eq!(free, 12);
+    }
+
+    #[test]
+    fn parse_balloon_stats_zero_free() {
+        let response = r#"{"ok":true,"actual_mib":64,"target_mib":128,"free_mib":0}"#;
+        let (actual, target, free) = parse_balloon_stats(response).unwrap();
+        assert_eq!(actual, 64);
+        assert_eq!(target, 128);
+        assert_eq!(free, 0);
+    }
+
+    #[test]
+    fn parse_balloon_stats_missing_fields_default_zero() {
+        let response = r#"{"ok":true}"#;
+        let (actual, target, free) = parse_balloon_stats(response).unwrap();
+        assert_eq!(actual, 0);
+        assert_eq!(target, 0);
+        assert_eq!(free, 0);
+    }
+
+    #[test]
+    fn parse_balloon_stats_error_response() {
+        let response = r#"{"ok":false,"error":"balloon device not configured"}"#;
+        let err = parse_balloon_stats(response).unwrap_err();
+        assert_eq!(err, "balloon device not configured");
+    }
+
+    #[test]
+    fn parse_balloon_stats_invalid_json() {
+        let err = parse_balloon_stats("not json").unwrap_err();
+        assert!(err.contains("Failed to parse"));
+    }
+
+    // === parse_mac: reject non-canonical octets ===
+
+    #[test]
+    fn parse_mac_rejects_single_digit_octets() {
+        assert!(parse_mac("1:2:3:4:5:6").is_err());
+    }
+
+    #[test]
+    fn parse_mac_rejects_non_canonical_lowercase() {
+        assert!(parse_mac("a:b:c:d:e:f").is_err());
+    }
+
+    #[test]
+    fn parse_mac_accepts_canonical_zero_padded() {
+        assert_eq!(
+            parse_mac("01:02:03:04:05:06").unwrap(),
+            [0x01, 0x02, 0x03, 0x04, 0x05, 0x06]
+        );
+    }
+
+    #[test]
+    fn parse_mac_rejects_three_digit_octet() {
+        assert!(parse_mac("001:02:03:04:05:06").is_err());
+    }
+
+    // === shell_escape ===
+
+    #[test]
+    fn shell_escape_simple_path() {
+        assert_eq!(shell_escape("/usr/local/bin"), "'/usr/local/bin'");
+    }
+
+    #[test]
+    fn shell_escape_path_with_spaces() {
+        assert_eq!(shell_escape("/my path/dir"), "'/my path/dir'");
+    }
+
+    #[test]
+    fn shell_escape_path_with_single_quote() {
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn shell_escape_path_with_double_quote() {
+        assert_eq!(shell_escape("say \"hello\""), "'say \"hello\"'");
+    }
+
+    #[test]
+    fn shell_escape_path_with_dollar() {
+        assert_eq!(shell_escape("/home/$USER"), "'/home/$USER'");
+    }
+
+    #[test]
+    fn shell_escape_path_with_backtick() {
+        assert_eq!(shell_escape("/tmp/`whoami`"), "'/tmp/`whoami`'");
+    }
+
+    #[test]
+    fn shell_escape_path_with_newline() {
+        assert_eq!(shell_escape("/tmp/a\nb"), "'/tmp/a\nb'");
+    }
+
+    #[test]
+    fn shell_escape_empty_string() {
+        assert_eq!(shell_escape(""), "''");
+    }
+
+    // === control_socket: conditional on balloon ===
+
+    #[test]
+    fn control_socket_none_without_balloon() {
+        let balloon: Option<u32> = None;
+        let socket = balloon.map(|_| control_socket_path("test-vm"));
+        assert!(socket.is_none());
+    }
+
+    #[test]
+    fn control_socket_some_with_balloon() {
+        let balloon: Option<u32> = Some(64);
+        let socket = balloon.map(|_| control_socket_path("test-vm"));
+        assert_eq!(socket, Some("/tmp/krunvm-test-vm.sock".to_string()));
+    }
+
+    // === validate_socket_path ===
+
+    #[test]
+    fn validate_socket_path_short() {
+        assert!(validate_socket_path("/tmp/net.sock").is_ok());
+    }
+
+    #[test]
+    fn validate_socket_path_exact_limit() {
+        let path = "a".repeat(MAX_SOCKET_PATH_LEN);
+        assert!(validate_socket_path(&path).is_ok());
+    }
+
+    #[test]
+    fn validate_socket_path_over_limit() {
+        let path = "a".repeat(MAX_SOCKET_PATH_LEN + 1);
+        assert!(validate_socket_path(&path).is_err());
+    }
+
+    #[test]
+    fn validate_socket_path_way_over() {
+        let path = "a".repeat(200);
+        assert!(validate_socket_path(&path).is_err());
+    }
+
+    // === validate_vm_name_for_socket ===
+
+    #[test]
+    fn validate_vm_name_short() {
+        assert!(validate_vm_name_for_socket("my-vm").is_ok());
+    }
+
+    #[test]
+    fn validate_vm_name_too_long() {
+        // /tmp/krunvm- (12) + name + .sock (5) = 17 overhead
+        // 87 + 17 = 104 > 103
+        let name = "a".repeat(87);
+        assert!(validate_vm_name_for_socket(&name).is_err());
+    }
+
+    #[test]
+    fn validate_vm_name_exact_limit() {
+        // 86 + 17 = 103 = MAX_SOCKET_PATH_LEN
+        let name = "a".repeat(86);
+        assert!(validate_vm_name_for_socket(&name).is_ok());
+    }
 }

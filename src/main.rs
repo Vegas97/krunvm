@@ -14,7 +14,7 @@ use std::io::{self, Error, ErrorKind, Read, Write};
 use std::os::unix::ffi::OsStringExt;
 
 use crate::commands::{
-    ChangeVmCmd, ConfigCmd, CreateCmd, DeleteCmd, InspectCmd, ListCmd, StartCmd,
+    BalloonCmd, ChangeVmCmd, ConfigCmd, CreateCmd, DeleteCmd, InspectCmd, ListCmd, StartCmd,
 };
 use clap::{Parser, Subcommand};
 #[cfg(target_os = "macos")]
@@ -38,6 +38,16 @@ pub struct VmConfig {
     container: String,
     workdir: String,
     dns: String,
+    net_socket: Option<String>,
+    mac_address: Option<String>,
+    #[serde(default)]
+    balloon_target_mb: Option<u32>,
+    #[serde(default)]
+    control_socket: Option<String>,
+    #[serde(default)]
+    rootfs_ro: bool,
+    #[serde(default)]
+    cap_drop: Vec<String>,
     mapped_volumes: HashMap<String, String>,
     mapped_ports: HashMap<String, String>,
 }
@@ -169,6 +179,7 @@ struct Cli {
 enum Command {
     Start(StartCmd),
     Create(CreateCmd),
+    Balloon(BalloonCmd),
     Inspect(InspectCmd),
     List(ListCmd),
     Delete(DeleteCmd),
@@ -248,6 +259,7 @@ fn main() {
         Command::Inspect(cmd) => cmd.run(&mut cfg),
         Command::Start(cmd) => cmd.run(&cfg),
         Command::Create(cmd) => cmd.run(&mut cfg),
+        Command::Balloon(cmd) => cmd.run(&cfg),
         Command::List(cmd) => cmd.run(&cfg),
         Command::Delete(cmd) => cmd.run(&mut cfg),
         Command::ChangeVm(cmd) => cmd.run(&mut cfg),

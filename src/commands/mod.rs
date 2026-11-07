@@ -1,3 +1,4 @@
+mod balloon;
 mod changevm;
 mod config;
 mod create;
@@ -6,6 +7,7 @@ mod inspect;
 mod list;
 mod start;
 
+pub use balloon::BalloonCmd;
 pub use changevm::ChangeVmCmd;
 pub use config::ConfigCmd;
 pub use create::CreateCmd;

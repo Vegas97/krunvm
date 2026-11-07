@@ -15,7 +15,7 @@ debug: $(KRUNVM_DEBUG)
 $(KRUNVM_RELEASE):
 	cargo build --release
 ifeq ($(OS),Darwin)
-	codesign --entitlements krunvm.entitlements --force -s - $@
+	codesign --entitlements krunvm-entitlements.plist --force -s - $@
 endif
 
 $(KRUNVM_DEBUG):
